@@ -1259,6 +1259,21 @@ func (_add) exec(vm *vm) {
 	right := vm.stack[vm.sp-1]
 	left := vm.stack[vm.sp-2]
 
+	if lf, ok := left.(valueFloat); ok {
+		if rf, ok := right.(valueFloat); ok {
+			// Fast path: two unboxed doubles. This is exactly the general
+			// path's default branch below (floatToValue of the float64 sum)
+			// without the type-switch dispatch. Canonicalization of the result
+			// (integral -> valueInt, -0, NaN, infinities) is preserved by
+			// floatToValue. Neither operand can be an Object, String or BigInt,
+			// so the checks skipped by this path would not have applied.
+			vm.sp--
+			vm.stack[vm.sp-1] = floatToValue(float64(lf) + float64(rf))
+			vm.pc++
+			return
+		}
+	}
+
 	if o, ok := left.(*Object); ok {
 		left = o.toPrimitive()
 	}
@@ -1356,8 +1371,27 @@ type _mul struct{}
 var mul _mul
 
 func (_mul) exec(vm *vm) {
-	left := toNumeric(vm.stack[vm.sp-2])
-	right := toNumeric(vm.stack[vm.sp-1])
+	left := vm.stack[vm.sp-2]
+	right := vm.stack[vm.sp-1]
+
+	if lf, ok := left.(valueFloat); ok {
+		if rf, ok := right.(valueFloat); ok {
+			// Fast path: two unboxed doubles. Identical to the general path's
+			// float fallthrough (floatToValue of the float64 product), but
+			// skips toNumeric, which would allocate a re-boxed copy of each
+			// operand that is already a canonical number. Canonicalization of
+			// the result (integral -> valueInt, -0, NaN, infinities, including
+			// 0.0 * -1.0 -> -0, matching the int path) is preserved by
+			// floatToValue. Neither operand can be a BigInt.
+			vm.sp--
+			vm.stack[vm.sp-1] = floatToValue(float64(lf) * float64(rf))
+			vm.pc++
+			return
+		}
+	}
+
+	left = toNumeric(left)
+	right = toNumeric(right)
 
 	var result Value
 
@@ -1677,8 +1711,26 @@ type _or struct{}
 var or _or
 
 func (_or) exec(vm *vm) {
-	left := toNumeric(vm.stack[vm.sp-2])
-	right := toNumeric(vm.stack[vm.sp-1])
+	left := vm.stack[vm.sp-2]
+	right := vm.stack[vm.sp-1]
+
+	if lf, ok := left.(valueFloat); ok {
+		if rf, ok := right.(valueFloat); ok {
+			// Fast path: two unboxed doubles. toInt32(valueFloat) applies the
+			// same ECMAScript ToInt32 conversion (truncation towards zero,
+			// NaN/Inf -> 0, int32 wrap-around) that the general path applies
+			// after toNumeric, whose only effect here is to re-box operands
+			// that are already numbers. intToValue canonicalizes the result
+			// exactly as before.
+			vm.sp--
+			vm.stack[vm.sp-1] = intToValue(int64(toInt32(lf) | toInt32(rf)))
+			vm.pc++
+			return
+		}
+	}
+
+	left = toNumeric(left)
+	right = toNumeric(right)
 	var result Value
 
 	if left, ok := left.(*valueBigInt); ok {
