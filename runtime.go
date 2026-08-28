@@ -2832,6 +2832,15 @@ func (r *Runtime) getHash() *maphash.Hash {
 	return r.hash
 }
 
+// maxIdleStackSize is the maximum value-stack capacity (in Value slots) the Runtime retains
+// while idle (i.e. while control is outside the Runtime). Stacks up to this size are kept
+// (cleared of value references) for reuse by the next top-level call, so that repeatedly
+// entering JavaScript (RunProgram, Callable, New) does not re-allocate and re-grow the stack
+// from scratch every time. Larger stacks, e.g. from deep recursion, are released entirely to
+// avoid unbounded memory retention. 8192 slots (128 KiB on 64-bit) is 8× the VM's 1024-slot
+// stack growth quantum (see valueStack.expand) and comfortably covers typical call depths.
+const maxIdleStackSize = 8 * 1024
+
 // called when the top level function returns normally (i.e. control is passed outside the Runtime).
 func (r *Runtime) leave() {
 	var jobs []func()
@@ -2842,7 +2851,13 @@ func (r *Runtime) leave() {
 		}
 	}
 	r.jobQueue = nil
-	r.vm.stack = nil
+	if cap(r.vm.stack) <= maxIdleStackSize {
+		// Keep the backing array for reuse, dropping references to dead values
+		// (the same treatment the nested RunProgram path applies, see RunProgram).
+		r.vm.clearStack()
+	} else {
+		r.vm.stack = nil
+	}
 }
 
 // called when the top level function returns (i.e. control is passed outside the Runtime) but it was due to an interrupt
