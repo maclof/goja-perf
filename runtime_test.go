@@ -3374,6 +3374,86 @@ func BenchmarkGoJSMixedBoundary(b *testing.B) {
 	}
 }
 
+// benchJsMethodHost is a host-style Go object exposed to scripts: a struct
+// pointer whose method mutates receiver state and accepts representative
+// primitive (string, int) and slice ([]string) arguments.
+type benchJsMethodHost struct {
+	audits int64
+}
+
+// Add registers a stock movement and returns a receipt summary.
+func (h *benchJsMethodHost) Add(sku string, qty int, tags []string) map[string]interface{} {
+	h.audits++
+	first := ""
+	if len(tags) > 0 {
+		first = tags[0]
+	}
+	return map[string]interface{}{
+		"audits": h.audits,
+		"total":  qty * (len(tags) + 1),
+		"sku":    sku + "|" + first,
+	}
+}
+
+// BenchmarkJSCallGoMethod measures JavaScript repeatedly calling a method on a
+// Go-defined struct pointer exposed as a host object. Each iteration executes
+// a compiled script expression that invokes host.Add with a varying global
+// quantity, and the returned receipt map is validated field by field. The
+// monotonically increasing audits value proves that every iteration invoked
+// the same Go receiver, so the method body cannot be skipped or cached.
+// Runtime setup, compilation and reusable conversions happen outside the
+// timed section.
+func BenchmarkJSCallGoMethod(b *testing.B) {
+	b.ReportAllocs()
+	b.StopTimer()
+	vm := New()
+	if err := vm.Set("host", &benchJsMethodHost{}); err != nil {
+		b.Fatal(err)
+	}
+	tags := []string{"new", "used"}
+	if err := vm.Set("tags", tags); err != nil {
+		b.Fatal(err)
+	}
+	prg := MustCompile("test.js", `host.Add("SKU-7", qty, tags)`, false)
+	wantSKU := "SKU-7|new"
+
+	b.StartTimer()
+	var totalSum int64
+	for i := 0; i < b.N; i++ {
+		qty := i & 7
+		if err := vm.Set("qty", qty); err != nil {
+			b.Fatal(err)
+		}
+		res, err := vm.RunProgram(prg)
+		if err != nil {
+			b.Fatal(err)
+		}
+		obj, ok := res.(*Object)
+		if !ok {
+			b.Fatalf("expected object result, got %T", res)
+		}
+		wantTotal := qty * (len(tags) + 1)
+		if got := obj.Get("total").ToInteger(); got != int64(wantTotal) {
+			b.Fatalf("unexpected total: %v, want %d", got, wantTotal)
+		}
+		if got := obj.Get("audits").ToInteger(); got != int64(i)+1 {
+			b.Fatalf("unexpected audits: %v, want %d", got, i+1)
+		}
+		if got := obj.Get("sku").String(); got != wantSKU {
+			b.Fatalf("unexpected sku: %q, want %q", got, wantSKU)
+		}
+		totalSum += int64(wantTotal)
+	}
+	b.StopTimer()
+
+	// Consume the accumulated results: qty cycles 0..7 and total is qty*3,
+	// so the expected sum is closed-form.
+	full, rem := int64(b.N/8), int64(b.N%8)
+	if want := (full*28 + rem*(rem-1)/2) * 3; totalSum != want {
+		b.Fatalf("unexpected total sum: %d, want %d", totalSum, want)
+	}
+}
+
 func BenchmarkMainLoop(b *testing.B) {
 	vm := New()
 
