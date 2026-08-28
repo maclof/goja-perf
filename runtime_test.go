@@ -3203,6 +3203,84 @@ func BenchmarkCallJS(b *testing.B) {
 	}
 }
 
+// BenchmarkGoCallJSFunction measures the cost of repeatedly calling a
+// JavaScript function from Go through the public API (AssertFunction),
+// passing representative primitive (int, float64, string) and object
+// (Go map) argument values and validating every returned object.
+// Runtime creation and compilation happen outside the timed section.
+func BenchmarkGoCallJSFunction(b *testing.B) {
+	b.ReportAllocs()
+	b.StopTimer()
+	vm := New()
+	const SETUP = `
+	function process(id, price, label, item) {
+		return {
+			id: id,
+			total: price * item.quantity,
+			label: label + ":" + item.sku,
+			prepaid: price > item.quantity
+		};
+	}
+	`
+	if _, err := vm.RunString(SETUP); err != nil {
+		b.Fatal(err)
+	}
+	process, ok := AssertFunction(vm.Get("process"))
+	if !ok {
+		b.Fatal("process is not a function")
+	}
+
+	// Constant argument values are hoisted out of the timed loop (goja
+	// Values are immutable and safely reusable); the id varies per call
+	// like a real workload passing fresh data.
+	price := 9.99
+	const quantity = 3
+	wantTotal := price * quantity
+	wantLabel := "order-1234:ABC-42"
+
+	priceArg := vm.ToValue(price)
+	labelArg := vm.ToValue("order-1234")
+	itemArg := vm.ToValue(map[string]interface{}{
+		"sku":      "ABC-42",
+		"quantity": quantity,
+	})
+
+	b.StartTimer()
+	var idSum int64
+	for i := 0; i < b.N; i++ {
+		id := int64(i & 0x3ff)
+		res, err := process(Undefined(), vm.ToValue(id), priceArg, labelArg, itemArg)
+		if err != nil {
+			b.Fatal(err)
+		}
+		obj, ok := res.(*Object)
+		if !ok {
+			b.Fatalf("expected object result, got %T", res)
+		}
+		if got := obj.Get("id"); got.ToInteger() != id {
+			b.Fatalf("unexpected id: %v, want %d", got, id)
+		}
+		if got := obj.Get("total").ToFloat(); got != wantTotal {
+			b.Fatalf("unexpected total: %v, want %v", got, wantTotal)
+		}
+		if got := obj.Get("label").String(); got != wantLabel {
+			b.Fatalf("unexpected label: %q, want %q", got, wantLabel)
+		}
+		if got := obj.Get("prepaid"); !got.ToBoolean() {
+			b.Fatalf("unexpected prepaid: %v", got)
+		}
+		idSum += id
+	}
+	b.StopTimer()
+
+	// Consume the accumulated results so the per-call work cannot be
+	// optimised away: id cycles 0..1023, so the expected sum is closed-form.
+	full, rem := int64(b.N/1024), int64(b.N%1024)
+	if want := full*523776 + rem*(rem-1)/2; idSum != want {
+		b.Fatalf("unexpected id sum: %d, want %d", idSum, want)
+	}
+}
+
 func BenchmarkMainLoop(b *testing.B) {
 	vm := New()
 
