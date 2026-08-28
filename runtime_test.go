@@ -3281,6 +3281,99 @@ func BenchmarkGoCallJSFunction(b *testing.B) {
 	}
 }
 
+// BenchmarkGoJSMixedBoundary measures a mixed workload that crosses the
+// Go/JavaScript boundary in both directions during every operation: Go calls a
+// JavaScript function through the public API (AssertFunction), and the
+// JavaScript function calls back into a Go-defined function (registered via
+// Runtime.Set) to compute part of its result. Arguments include representative
+// primitives, a Go struct and a Go slice; the JavaScript function returns a
+// fresh object which is validated in Go. Runtime setup, compilation and the
+// conversion of reusable constants happen outside the timed section.
+func BenchmarkGoJSMixedBoundary(b *testing.B) {
+	b.ReportAllocs()
+	b.StopTimer()
+	vm := New()
+	const SETUP = `
+	function checkout(order, region, couponId) {
+		var amount = order.Qty * order.Price;
+		var discount = lookupCoupon(region, couponId);
+		return {
+			total: amount - discount,
+			ref: region + ":" + order.SKU + ":" + order.Items[0],
+			lines: order.Items.length
+		};
+	}
+	`
+	if _, err := vm.RunString(SETUP); err != nil {
+		b.Fatal(err)
+	}
+	checkout, ok := AssertFunction(vm.Get("checkout"))
+	if !ok {
+		b.Fatal("checkout is not a function")
+	}
+	rates := map[string]float64{"eu": 0.25, "us": 0.2, "apac": 0.3}
+	if err := vm.Set("lookupCoupon", func(region string, id int) float64 {
+		return rates[region] * float64(id)
+	}); err != nil {
+		b.Fatal(err)
+	}
+
+	type benchOrder struct {
+		SKU   string
+		Price float64
+		Qty   int
+		Items []string
+	}
+	order := benchOrder{SKU: "ABC-42", Price: 9.99, Qty: 3, Items: []string{"widget", "spacer"}}
+
+	// Constant argument values are hoisted out of the timed loop (goja Values
+	// are immutable and safely reusable); the coupon id varies per call like a
+	// real workload passing fresh data.
+	price := 9.99
+	amount := price * float64(order.Qty)
+	rate := rates["eu"]
+	wantRef := "eu:ABC-42:widget"
+	var wantTotals [8]float64 // discount cycle: id & 7
+	for j := range wantTotals {
+		wantTotals[j] = amount - rate*float64(j)
+	}
+
+	orderArg := vm.ToValue(order)
+	regionArg := vm.ToValue("eu")
+
+	b.StartTimer()
+	var idSum int64
+	for i := 0; i < b.N; i++ {
+		id := int64(i & 7)
+		res, err := checkout(Undefined(), orderArg, regionArg, vm.ToValue(id))
+		if err != nil {
+			b.Fatal(err)
+		}
+		obj, ok := res.(*Object)
+		if !ok {
+			b.Fatalf("expected object result, got %T", res)
+		}
+		if got := obj.Get("total").ToFloat(); got != wantTotals[id] {
+			b.Fatalf("unexpected total: %v, want %v", got, wantTotals[id])
+		}
+		if got := obj.Get("ref").String(); got != wantRef {
+			b.Fatalf("unexpected ref: %q, want %q", got, wantRef)
+		}
+		if got := obj.Get("lines").ToInteger(); got != int64(len(order.Items)) {
+			b.Fatalf("unexpected lines: %v, want %d", got, len(order.Items))
+		}
+		idSum += id
+	}
+	b.StopTimer()
+
+	// Consume the accumulated results so the per-call work cannot be
+	// optimised away: id cycles 0..7, so the expected sum is closed-form.
+	full, rem := int64(b.N/8), int64(b.N%8)
+	if want := full*28 + rem*(rem-1)/2; idSum != want {
+		b.Fatalf("unexpected id sum: %d, want %d", idSum, want)
+	}
+}
+
 func BenchmarkMainLoop(b *testing.B) {
 	vm := New()
 
