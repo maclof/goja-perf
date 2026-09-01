@@ -9,7 +9,11 @@ const (
 	// past the representative 64-iteration tier-up call, while admitting a
 	// sustained loop after 64 additional quickened backedges.
 	typedFloatTraceThreshold = 96
-	maxTieringPrograms       = 256
+	// Global counter traces have a very small Go lowering cost, but delaying
+	// activation keeps the representative one-off 64-iteration tier-up on the
+	// quickened path. Sustained loops activate after 64 additional backedges.
+	typedGlobalCounterTraceThreshold = 96
+	maxTieringPrograms               = 256
 )
 
 // runtimeTiering owns all mutable tiering data for one Runtime. Shared Programs
@@ -19,16 +23,17 @@ type runtimeTiering struct {
 }
 
 type programTierState struct {
-	program        *Program
-	primaryPC      int
-	primaryCount   uint16
-	primarySet     bool
-	backedges      map[int]uint16
-	quickProgram   *Program
-	typed          *typedTraceTierState
-	attempted      bool
-	floatCandidate bool
-	blockCount     int
+	program         *Program
+	primaryPC       int
+	primaryCount    uint16
+	primarySet      bool
+	backedges       map[int]uint16
+	quickProgram    *Program
+	typed           *typedTraceTierState
+	attempted       bool
+	floatCandidate  bool
+	globalCandidate bool
+	blockCount      int
 }
 
 func (t *runtimeTiering) lookup(program *Program) *programTierState {
@@ -60,17 +65,28 @@ func (t *runtimeTiering) startTracking(program *Program, pc int, count uint16) *
 
 func (s *programTierState) recordBackedge(pc int) {
 	if s.quickProgram != nil {
-		if s.floatCandidate && pc == s.primaryPC {
-			if s.primaryCount < typedFloatTraceThreshold {
+		if (s.floatCandidate || s.globalCandidate) && pc == s.primaryPC {
+			threshold := uint16(typedFloatTraceThreshold)
+			if s.globalCandidate {
+				threshold = typedGlobalCounterTraceThreshold
+			}
+			if s.primaryCount < threshold {
 				s.primaryCount++
 			}
-			if s.primaryCount == typedFloatTraceThreshold {
-				s.floatCandidate = false
+			if s.primaryCount == threshold {
 				if tracked, ok := s.quickProgram.code[pc].(quickenedTrackedJump); ok {
 					s.quickProgram.code[pc] = quickenedJump(tracked)
 				}
-				if trace := lowerTypedFloatLoopTraceAt(s.program, pc); trace != nil {
-					s.installTypedTrace(trace)
+				if s.floatCandidate {
+					s.floatCandidate = false
+					if trace := lowerTypedFloatLoopTraceAt(s.program, pc); trace != nil {
+						s.installTypedTrace(trace)
+					}
+				} else {
+					s.globalCandidate = false
+					if trace := lowerGlobalCounterTraceAt(s.program, pc); trace != nil {
+						s.installGlobalCounterTrace(trace)
+					}
 				}
 			}
 		}
@@ -107,8 +123,9 @@ func (s *programTierState) recordBackedge(pc int) {
 func (s *programTierState) quicken(hotBackedgePC int) {
 	s.attempted = true
 	floatCandidate := isTypedFloatLoopTraceAt(s.program, hotBackedgePC)
+	globalCandidate := isGlobalCounterTraceAt(s.program, hotBackedgePC)
 	trackedBackedgePC := -1
-	if floatCandidate {
+	if floatCandidate || globalCandidate {
 		trackedBackedgePC = hotBackedgePC
 	}
 	code, blocks := buildQuickenedCodeWithTrackedBackedge(s.program, trackedBackedgePC)
@@ -123,6 +140,11 @@ func (s *programTierState) quicken(hotBackedgePC int) {
 		s.installTypedTrace(trace)
 	} else if floatCandidate {
 		s.floatCandidate = true
+		s.primaryPC = hotBackedgePC
+		s.primaryCount = tieringBackedgeThreshold
+		s.primarySet = true
+	} else if globalCandidate {
+		s.globalCandidate = true
 		s.primaryPC = hotBackedgePC
 		s.primaryCount = tieringBackedgeThreshold
 		s.primarySet = true
@@ -268,7 +290,7 @@ func (j quickenedJump) exec(vm *vm) {
 type quickenedTrackedJump int32
 
 func (j quickenedTrackedJump) exec(vm *vm) {
-	if state := vm.tier; state != nil && state.floatCandidate {
+	if state := vm.tier; state != nil && (state.floatCandidate || state.globalCandidate) {
 		state.recordBackedge(vm.pc)
 	}
 	vm.pc += int(j)
