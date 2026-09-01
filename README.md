@@ -17,6 +17,11 @@ go test ./...
 go test -run '^$' -bench . -benchmem -count=10 ./...
 ```
 
+For running untrusted JavaScript with an explicit set of host capabilities,
+standard-global policy, dynamic-code restriction, and execution timeout, see
+[Sandboxing](SANDBOX.md). The sandbox is opt-in; ordinary `goja.New()` behavior
+is unchanged.
+
 The original upstream documentation follows.
 
 ---
