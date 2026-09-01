@@ -5,6 +5,10 @@ import "sync/atomic"
 const (
 	tieringTrackingThreshold = 8
 	tieringBackedgeThreshold = 32
+	// Float traces allocate a second Program and lowered metadata. Delay them
+	// past the representative 64-iteration tier-up call, while admitting a
+	// sustained loop after 64 additional quickened backedges.
+	typedFloatTraceThreshold = 96
 	maxTieringPrograms       = 256
 )
 
@@ -15,15 +19,16 @@ type runtimeTiering struct {
 }
 
 type programTierState struct {
-	program      *Program
-	primaryPC    int
-	primaryCount uint16
-	primarySet   bool
-	backedges    map[int]uint16
-	quickProgram *Program
-	typed        *typedTraceTierState
-	attempted    bool
-	blockCount   int
+	program        *Program
+	primaryPC      int
+	primaryCount   uint16
+	primarySet     bool
+	backedges      map[int]uint16
+	quickProgram   *Program
+	typed          *typedTraceTierState
+	attempted      bool
+	floatCandidate bool
+	blockCount     int
 }
 
 func (t *runtimeTiering) lookup(program *Program) *programTierState {
@@ -54,7 +59,24 @@ func (t *runtimeTiering) startTracking(program *Program, pc int, count uint16) *
 }
 
 func (s *programTierState) recordBackedge(pc int) {
-	if s.quickProgram != nil || s.attempted {
+	if s.quickProgram != nil {
+		if s.floatCandidate && pc == s.primaryPC {
+			if s.primaryCount < typedFloatTraceThreshold {
+				s.primaryCount++
+			}
+			if s.primaryCount == typedFloatTraceThreshold {
+				s.floatCandidate = false
+				if tracked, ok := s.quickProgram.code[pc].(quickenedTrackedJump); ok {
+					s.quickProgram.code[pc] = quickenedJump(tracked)
+				}
+				if trace := lowerTypedFloatLoopTraceAt(s.program, pc); trace != nil {
+					s.installTypedTrace(trace)
+				}
+			}
+		}
+		return
+	}
+	if s.attempted {
 		return
 	}
 	if !s.primarySet {
@@ -84,7 +106,12 @@ func (s *programTierState) recordBackedge(pc int) {
 
 func (s *programTierState) quicken(hotBackedgePC int) {
 	s.attempted = true
-	code, blocks := buildQuickenedCode(s.program)
+	floatCandidate := isTypedFloatLoopTraceAt(s.program, hotBackedgePC)
+	trackedBackedgePC := -1
+	if floatCandidate {
+		trackedBackedgePC = hotBackedgePC
+	}
+	code, blocks := buildQuickenedCodeWithTrackedBackedge(s.program, trackedBackedgePC)
 	if blocks == 0 {
 		return
 	}
@@ -92,12 +119,21 @@ func (s *programTierState) quicken(hotBackedgePC int) {
 	quickProgram.code = code
 	s.quickProgram = &quickProgram
 	s.blockCount = blocks
-	if trace := lowerTypedIntLoopTraceAt(s.program, hotBackedgePC); trace != nil {
-		traceProgram := quickProgram
-		traceProgram.code = append([]instruction(nil), quickProgram.code...)
-		traceProgram.code[trace.entryPC] = &typedTraceEntry{state: s}
-		s.typed = &typedTraceTierState{trace: trace, program: &traceProgram}
+	if trace := lowerTypedIntegerLoopTraceAt(s.program, hotBackedgePC); trace != nil {
+		s.installTypedTrace(trace)
+	} else if floatCandidate {
+		s.floatCandidate = true
+		s.primaryPC = hotBackedgePC
+		s.primaryCount = tieringBackedgeThreshold
+		s.primarySet = true
 	}
+}
+
+func (s *programTierState) installTypedTrace(trace *typedIntLoopTrace) {
+	traceProgram := *s.quickProgram
+	traceProgram.code = append([]instruction(nil), s.quickProgram.code...)
+	traceProgram.code[trace.entryPC] = &typedTraceEntry{state: s}
+	s.typed = &typedTraceTierState{trace: trace, program: &traceProgram}
 }
 
 func (s *programTierState) executableProgram() *Program {
@@ -229,6 +265,15 @@ func (j quickenedJump) exec(vm *vm) {
 	vm.pc += int(j)
 }
 
+type quickenedTrackedJump int32
+
+func (j quickenedTrackedJump) exec(vm *vm) {
+	if state := vm.tier; state != nil && state.floatCandidate {
+		state.recordBackedge(vm.pc)
+	}
+	vm.pc += int(j)
+}
+
 type quickenedJeqP int32
 
 func (j quickenedJeqP) exec(vm *vm) {
@@ -241,6 +286,10 @@ func (j quickenedJeqP) exec(vm *vm) {
 }
 
 func buildQuickenedCode(program *Program) ([]instruction, int) {
+	return buildQuickenedCodeWithTrackedBackedge(program, -1)
+}
+
+func buildQuickenedCodeWithTrackedBackedge(program *Program, trackedBackedgePC int) ([]instruction, int) {
 	if program == nil || len(program.code) == 0 {
 		return nil, 0
 	}
@@ -306,7 +355,11 @@ func buildQuickenedCode(program *Program) ([]instruction, int) {
 	for pc, ins := range code {
 		switch ins := ins.(type) {
 		case jump:
-			code[pc] = quickenedJump(ins)
+			if pc == trackedBackedgePC {
+				code[pc] = quickenedTrackedJump(ins)
+			} else {
+				code[pc] = quickenedJump(ins)
+			}
 		case jeqP:
 			code[pc] = quickenedJeqP(ins)
 		}

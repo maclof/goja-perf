@@ -33,6 +33,24 @@ func compileTestNativeTrace(t *testing.T) (*typedIntLoopTrace, *nativeTraceCode)
 	return trace, native
 }
 
+func TestNativeTraceRejectsTypedFloatIR(t *testing.T) {
+	runtime, call := setupTypedFloatTraceTest(t)
+	if _, err := call(_undefined, valueInt(128)); err != nil {
+		t.Fatal(err)
+	}
+	state := typedTraceState(runtime)
+	if state == nil {
+		t.Fatal("floating-point trace was not produced")
+	}
+	native, err := compileNativeTrace(state.typed.trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if native != nil {
+		t.Fatal("integer native backend accepted floating-point typed IR")
+	}
+}
+
 func setupNativeTraceTest(t *testing.T) (*Runtime, Callable, *programTierState) {
 	t.Helper()
 	runtime, call := setupTypedTraceTest(t)

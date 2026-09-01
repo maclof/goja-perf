@@ -114,7 +114,7 @@ func nativeTraceIRSupported(trace *typedIntLoopTrace) bool {
 	}
 	var guarded, mapped [typedTraceRegisterCount]bool
 	for _, guard := range trace.guards {
-		if guard.register >= typedTraceRegisterCount || guard.deopt != 0 || guarded[guard.register] {
+		if guard.register >= typedTraceRegisterCount || guard.kind != typedTraceValueInt || guard.deopt != 0 || guarded[guard.register] {
 			return false
 		}
 		guarded[guard.register] = true

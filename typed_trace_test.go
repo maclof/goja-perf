@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const typedTraceTestSource = `
@@ -62,6 +63,282 @@ func callTypedTraceTest(t *testing.T, call Callable, n, seed Value) Value {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func setupTypedFloatTraceTest(t *testing.T) (*Runtime, Callable) {
+	t.Helper()
+	runtime := New()
+	if _, err := runtime.RunString(typedFloatTraceBenchmarkSource + `
+var typedFloatTraceThrowingLimit = {
+	valueOf: function() { throw new Error("typed float trace deopt"); }
+};
+`); err != nil {
+		t.Fatal(err)
+	}
+	call, ok := AssertFunction(runtime.Get("typedFloatTraceBenchmarkLoop"))
+	if !ok {
+		t.Fatal("typedFloatTraceBenchmarkLoop is not callable")
+	}
+	return runtime, call
+}
+
+func typedFloatTraceWant(iterations int64) Value {
+	x := 1.25
+	for i := int64(0); i < iterations; i++ {
+		x = (x + 3.5) * 0.75
+	}
+	return valueFloat(x)
+}
+
+func TestTypedFloatTraceLowersAndExecutes(t *testing.T) {
+	runtime, call := setupTypedFloatTraceTest(t)
+	if result, err := call(_undefined, valueInt(128)); err != nil || !result.StrictEquals(typedFloatTraceWant(128)) {
+		t.Fatalf("tier-up result: got %v, err=%v", result, err)
+	}
+	state := typedTraceState(runtime)
+	if state == nil {
+		t.Fatal("hot floating-point loop did not lower to typed IR")
+	}
+	if len(state.typed.trace.code) != 9 || state.typed.trace.code[2].opcode != typedTraceFloatAddLiteral ||
+		state.typed.trace.code[4].opcode != typedTraceFloatMultiplyLiteral || state.typed.trace.guards[2].kind != typedTraceValueFloat {
+		t.Fatalf("unexpected floating-point IR: %+v", state.typed.trace)
+	}
+	for _, iterations := range []int64{0, 1, 5, 1000} {
+		result, err := call(_undefined, valueInt(iterations))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := typedFloatTraceWant(iterations); !result.StrictEquals(want) {
+			t.Fatalf("typed float result for n=%d: got %v (%T), want %v (%T)", iterations, result, result, want, want)
+		}
+	}
+	if state.typed.disabled() || state.typed.guardFailures != 0 {
+		t.Fatalf("floating-point trace unexpectedly deoptimised: disabled=%t failures=%d", state.typed.disabled(), state.typed.guardFailures)
+	}
+}
+
+func TestTypedFloatTraceActivationIsDelayed(t *testing.T) {
+	runtime, call := setupTypedFloatTraceTest(t)
+	if _, err := call(_undefined, valueInt(64)); err != nil {
+		t.Fatal(err)
+	}
+	var state *programTierState
+	for _, candidate := range runtime.vm.tiering.programs {
+		state = candidate
+		break
+	}
+	if state == nil || state.quickProgram == nil || !state.floatCandidate {
+		t.Fatalf("floating-point quick tier state: %p", state)
+	}
+	if state.typed != nil {
+		t.Fatal("one-off 64-iteration call allocated floating-point typed IR")
+	}
+	if _, err := call(_undefined, valueInt(32)); err != nil {
+		t.Fatal(err)
+	}
+	if state.typed == nil || state.floatCandidate {
+		t.Fatal("sustained floating-point loop did not install typed IR")
+	}
+	if _, ok := state.quickProgram.code[state.primaryPC].(quickenedTrackedJump); ok {
+		t.Fatal("quick fallback retained the float activation tracking jump")
+	}
+}
+
+func TestTypedFloatTraceDecisionDemotesTrackedJumpOnLoweringFailure(t *testing.T) {
+	program := &Program{code: []instruction{loadUndef}}
+	quickProgram := &Program{code: []instruction{quickenedTrackedJump(-1)}}
+	state := &programTierState{
+		program:        program,
+		primaryPC:      0,
+		primaryCount:   typedFloatTraceThreshold - 1,
+		primarySet:     true,
+		quickProgram:   quickProgram,
+		attempted:      true,
+		floatCandidate: true,
+	}
+	state.recordBackedge(0)
+	if state.floatCandidate || state.typed != nil {
+		t.Fatalf("failed float decision state: candidate=%t typed=%p", state.floatCandidate, state.typed)
+	}
+	if _, ok := state.quickProgram.code[0].(quickenedJump); !ok {
+		t.Fatalf("failed float decision retained tracking instruction: %T", state.quickProgram.code[0])
+	}
+}
+
+func TestTypedFloatTraceGuardFailureMatchesInterpreter(t *testing.T) {
+	runtime, call := setupTypedFloatTraceTest(t)
+	if _, err := call(_undefined, valueInt(128)); err != nil {
+		t.Fatal(err)
+	}
+	state := typedTraceState(runtime)
+	if state == nil {
+		t.Fatal("floating-point trace was not produced")
+	}
+	result, err := call(_undefined, valueFloat(5.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := typedFloatTraceWant(6); !result.StrictEquals(want) {
+		t.Fatalf("polymorphic limit result: got %v (%T), want %v (%T)", result, result, want, want)
+	}
+	if !state.typed.disabled() || state.typed.guardFailures != 1 {
+		t.Fatalf("guard failure state: disabled=%t failures=%d", state.typed.disabled(), state.typed.guardFailures)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := call(_undefined, valueInt(5)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if state.typed.guardFailures != 1 {
+		t.Fatalf("guard failure thrashed: got %d, want 1", state.typed.guardFailures)
+	}
+}
+
+func TestTypedFloatTraceCanonicalizesIntegralResult(t *testing.T) {
+	runtime := New()
+	if _, err := runtime.RunString(`
+function typedFloatTraceIntegralResult(n) {
+	var x = 1.5;
+	for (var i = 0; i < n; i++) {
+		x = (x + 0.5) * 2.5;
+	}
+	return x;
+}
+`); err != nil {
+		t.Fatal(err)
+	}
+	call, ok := AssertFunction(runtime.Get("typedFloatTraceIntegralResult"))
+	if !ok {
+		t.Fatal("typedFloatTraceIntegralResult is not callable")
+	}
+	if _, err := call(_undefined, valueInt(128)); err != nil {
+		t.Fatal(err)
+	}
+	if state := typedTraceState(runtime); state == nil {
+		t.Fatal("floating-point trace was not produced")
+	}
+	result, err := call(_undefined, valueInt(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.StrictEquals(valueInt(5)) {
+		t.Fatalf("integral result: got %v (%T), want 5", result, result)
+	}
+	if exported, ok := result.Export().(int64); !ok || exported != 5 {
+		t.Fatalf("integral result export: got %v (%T), want int64(5)", result.Export(), result.Export())
+	}
+}
+
+func TestTypedFloatTraceExceptionDeoptPreservesSource(t *testing.T) {
+	hotRuntime, hotCall := setupTypedFloatTraceTest(t)
+	if _, err := hotCall(_undefined, valueInt(128)); err != nil {
+		t.Fatal(err)
+	}
+	_, hotErr := hotCall(_undefined, hotRuntime.Get("typedFloatTraceThrowingLimit"))
+	if hotErr == nil || !strings.Contains(hotErr.Error(), "typed float trace deopt") {
+		t.Fatalf("unexpected hot error: %v", hotErr)
+	}
+	state := typedTraceState(hotRuntime)
+	if state == nil || !state.typed.disabled() || state.typed.guardFailures != 1 {
+		t.Fatalf("exception guard did not disable float trace: state=%p", state)
+	}
+
+	coldRuntime, coldCall := setupTypedFloatTraceTest(t)
+	_, coldErr := coldCall(_undefined, coldRuntime.Get("typedFloatTraceThrowingLimit"))
+	if coldErr == nil {
+		t.Fatal("cold interpreter did not throw")
+	}
+	hotException := hotErr.(*Exception)
+	coldException := coldErr.(*Exception)
+	if len(hotException.stack) < 2 || len(coldException.stack) < 2 {
+		t.Fatalf("incomplete stacks: hot=%d cold=%d", len(hotException.stack), len(coldException.stack))
+	}
+	hotFrame := hotException.stack[1]
+	coldFrame := coldException.stack[1]
+	if hotFrame.pc != coldFrame.pc || hotFrame.Position() != coldFrame.Position() {
+		t.Fatalf("float deopt source differs: hot pc/position=%d/%v, cold=%d/%v", hotFrame.pc, hotFrame.Position(), coldFrame.pc, coldFrame.Position())
+	}
+}
+
+func TestTypedFloatTraceProfilerUsesOriginalProgram(t *testing.T) {
+	runtime, call := setupTypedFloatTraceTest(t)
+	if _, err := call(_undefined, valueInt(128)); err != nil {
+		t.Fatal(err)
+	}
+	state := typedTraceState(runtime)
+	if state == nil {
+		t.Fatal("floating-point trace was not produced")
+	}
+	if err := StartProfile(io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	result, err := call(_undefined, valueInt(128))
+	StopProfile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := typedFloatTraceWant(128); !result.StrictEquals(want) {
+		t.Fatalf("profiled result: got %v, want %v", result, want)
+	}
+	if state.typed.disabled() || state.typed.guardFailures != 0 {
+		t.Fatal("profiling permanently disabled floating-point trace")
+	}
+}
+
+func TestTypedFloatTraceInterrupt(t *testing.T) {
+	runtime := New()
+	started := make(chan struct{}, 1)
+	if err := runtime.Set("typedFloatTraceStarted", func() { started <- struct{}{} }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.RunString(`
+function typedFloatTraceInterruptLoop(n) {
+	var x = 1.25;
+	typedFloatTraceStarted();
+	for (var i = 0; i < n; i++) {
+		x = (x + 3.5) * 0.75;
+	}
+	return x;
+}
+`); err != nil {
+		t.Fatal(err)
+	}
+	call, ok := AssertFunction(runtime.Get("typedFloatTraceInterruptLoop"))
+	if !ok {
+		t.Fatal("typedFloatTraceInterruptLoop is not callable")
+	}
+	if _, err := call(_undefined, valueInt(128)); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	state := typedTraceState(runtime)
+	if state == nil {
+		t.Fatal("floating-point trace was not produced")
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := call(_undefined, valueInt(maxInt))
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for floating-point trace")
+	}
+	runtime.Interrupt("float trace stop")
+	select {
+	case err := <-result:
+		interrupted, ok := err.(*InterruptedError)
+		if !ok || interrupted.Value() != "float trace stop" {
+			t.Fatalf("unexpected interrupt result: %T %v", err, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("floating-point trace did not observe interrupt")
+	}
+	if state.typed.disabled() || state.typed.guardFailures != 0 {
+		t.Fatal("interrupt permanently disabled floating-point trace")
+	}
 }
 
 func TestTypedTraceLowersAndExecutes(t *testing.T) {
