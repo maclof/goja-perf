@@ -116,17 +116,34 @@ func nativeTraceIRLoopShape(trace *typedIntLoopTrace) (shape typedTraceLoopShape
 	if code[0].opcode == typedTraceExitUnlessLess &&
 		code[2].opcode == typedTraceGuardIncrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
 		code[4].opcode == typedTraceIncrement && code[4].dst == typedTraceCounter {
-		return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive}, true
+		return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive, step: 1}, true
 	}
 	if code[0].opcode == typedTraceExitUnlessLessOrEqual &&
 		code[2].opcode == typedTraceGuardIncrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
 		code[4].opcode == typedTraceIncrement && code[4].dst == typedTraceCounter {
-		return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive}, true
+		return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive, step: 1}, true
 	}
 	if code[0].opcode == typedTraceExitUnlessGreater &&
 		code[2].opcode == typedTraceGuardDecrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
 		code[4].opcode == typedTraceDecrement && code[4].dst == typedTraceCounter {
-		return typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive}, true
+		return typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive, step: -1}, true
+	}
+	if code[2].opcode == typedTraceGuardAddImmediateRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
+		code[4].opcode == typedTraceAddImmediate && code[4].dst == typedTraceCounter && code[2].exitPC == code[4].exitPC {
+		step := int64(code[4].exitPC)
+		if step < -1<<31 || step > 1<<31-1 || step >= -1 && step <= 1 {
+			return shape, false
+		}
+		switch {
+		case step > 0 && code[0].opcode == typedTraceExitUnlessLess:
+			return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive, step: step}, true
+		case step > 0 && code[0].opcode == typedTraceExitUnlessLessOrEqual:
+			return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive, step: step}, true
+		case step < 0 && code[0].opcode == typedTraceExitUnlessGreater:
+			return typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive, step: step}, true
+		case step < 0 && code[0].opcode == typedTraceExitUnlessGreaterOrEqual:
+			return typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopInclusive, step: step}, true
+		}
 	}
 	return shape, false
 }
@@ -260,6 +277,10 @@ func (e *nativeTraceEmitter) finish() ([]byte, error) {
 }
 
 func emitNativeTraceAMD64(shape typedTraceLoopShape) ([]byte, error) {
+	if shape.step == 0 || shape.direction == typedTraceLoopAscending && shape.step < 0 ||
+		shape.direction == typedTraceLoopDescending && shape.step > 0 || shape.step < -1<<31 || shape.step > 1<<31-1 {
+		return nil, errors.New("unsupported native trace induction step")
+	}
 	e := newNativeTraceEmitter()
 	// R10 is the frame pointer. RAX=counter, RDX=accumulator, R8=budget,
 	// R11=maxInt, RCX=-maxInt, and R9 is the sole scratch register. These
@@ -272,34 +293,60 @@ func emitNativeTraceAMD64(shape typedTraceLoopShape) ([]byte, error) {
 
 	e.label(nativeTraceLoop)
 	e.emit(0x49, 0x3b, 0x42, 0x08) // CMP RAX, [R10+limit]
-	switch shape {
-	case typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive}:
+	switch {
+	case shape.direction == typedTraceLoopDescending && shape.comparison == typedTraceLoopExclusive:
 		e.jump([]byte{0x0f, 0x8e}, nativeTraceNormal) // JLE
-	case typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive}:
+	case shape.direction == typedTraceLoopDescending && shape.comparison == typedTraceLoopInclusive:
+		e.jump([]byte{0x0f, 0x8c}, nativeTraceNormal) // JL
+	case shape.direction == typedTraceLoopAscending && shape.comparison == typedTraceLoopInclusive:
 		e.jump([]byte{0x0f, 0x8f}, nativeTraceNormal) // JG
-	case typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive}:
+	case shape.direction == typedTraceLoopAscending && shape.comparison == typedTraceLoopExclusive:
 		e.jump([]byte{0x0f, 0x8d}, nativeTraceNormal) // JGE
 	default:
 		return nil, errors.New("unsupported native trace loop shape")
 	}
-	e.emit(0x49, 0x89, 0xd1) // MOV R9, RDX
-	e.emit(0x49, 0x01, 0xc1) // ADD R9, RAX
-	e.emit(0x4d, 0x39, 0xd9) // CMP R9, R11
-	e.jump([]byte{0x0f, 0x8f}, nativeTraceGuard)
-	e.emit(0x49, 0x39, 0xc9) // CMP R9, RCX
-	e.jump([]byte{0x0f, 0x8c}, nativeTraceGuard)
-	if shape.direction == typedTraceLoopDescending {
-		e.emit(0x48, 0x39, 0xc8) // CMP RAX, RCX
-		e.jump([]byte{0x0f, 0x8e}, nativeTraceGuard)
+	if shape.step == 1 || shape.step == -1 {
+		e.emit(0x49, 0x89, 0xd1) // MOV R9, RDX
+		e.emit(0x49, 0x01, 0xc1) // ADD R9, RAX
+		e.emit(0x4d, 0x39, 0xd9) // CMP R9, R11
+		e.jump([]byte{0x0f, 0x8f}, nativeTraceGuard)
+		e.emit(0x49, 0x39, 0xc9) // CMP R9, RCX
+		e.jump([]byte{0x0f, 0x8c}, nativeTraceGuard)
+		if shape.direction == typedTraceLoopDescending {
+			e.emit(0x48, 0x39, 0xc8) // CMP RAX, RCX
+			e.jump([]byte{0x0f, 0x8e}, nativeTraceGuard)
+		} else {
+			e.emit(0x4c, 0x39, 0xd8) // CMP RAX, R11
+			e.jump([]byte{0x0f, 0x8d}, nativeTraceGuard)
+		}
+		e.emit(0x4c, 0x89, 0xca) // MOV RDX, R9
+		if shape.direction == typedTraceLoopDescending {
+			e.emit(0x48, 0xff, 0xc8) // DEC RAX
+		} else {
+			e.emit(0x48, 0xff, 0xc0) // INC RAX
+		}
 	} else {
-		e.emit(0x4c, 0x39, 0xd8) // CMP RAX, R11
-		e.jump([]byte{0x0f, 0x8d}, nativeTraceGuard)
-	}
-	e.emit(0x4c, 0x89, 0xca) // MOV RDX, R9
-	if shape.direction == typedTraceLoopDescending {
-		e.emit(0x48, 0xff, 0xc8) // DEC RAX
-	} else {
-		e.emit(0x48, 0xff, 0xc0) // INC RAX
+		// Validate counter+step without committing it so a guard exit retains
+		// the loop-header state required by deoptimisation.
+		e.emit(0x49, 0x89, 0xc1) // MOV R9, RAX
+		e.emit(0x49, 0x81, 0xc1) // ADD R9, imm32
+		var immediate [4]byte
+		binary.LittleEndian.PutUint32(immediate[:], uint32(int32(shape.step)))
+		e.emit(immediate[:]...)
+		e.emit(0x4d, 0x39, 0xd9) // CMP R9, R11
+		e.jump([]byte{0x0f, 0x8f}, nativeTraceGuard)
+		e.emit(0x49, 0x39, 0xc9) // CMP R9, RCX
+		e.jump([]byte{0x0f, 0x8c}, nativeTraceGuard)
+
+		e.emit(0x49, 0x89, 0xd1) // MOV R9, RDX
+		e.emit(0x49, 0x01, 0xc1) // ADD R9, RAX
+		e.emit(0x4d, 0x39, 0xd9) // CMP R9, R11
+		e.jump([]byte{0x0f, 0x8f}, nativeTraceGuard)
+		e.emit(0x49, 0x39, 0xc9) // CMP R9, RCX
+		e.jump([]byte{0x0f, 0x8c}, nativeTraceGuard)
+		e.emit(0x4c, 0x89, 0xca) // MOV RDX, R9
+		e.emit(0x48, 0x05)       // ADD RAX, imm32
+		e.emit(immediate[:]...)
 	}
 	e.emit(0x4d, 0x8b, 0x4a, 0x20) // MOV R9, [R10+interrupt]
 	e.emit(0x41, 0x83, 0x39, 0x00) // CMP DWORD PTR [R9], 0

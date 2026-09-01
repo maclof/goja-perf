@@ -81,6 +81,9 @@ const (
 	typedTraceGuardDecrementRange
 	typedTraceDecrement
 	typedTraceExitUnlessLessOrEqual
+	typedTraceExitUnlessGreaterOrEqual
+	typedTraceGuardAddImmediateRange
+	typedTraceAddImmediate
 )
 
 type typedTraceLoopDirection uint8
@@ -100,6 +103,7 @@ const (
 type typedTraceLoopShape struct {
 	direction  typedTraceLoopDirection
 	comparison typedTraceLoopComparison
+	step       int64
 }
 
 type typedTraceIR struct {
@@ -182,21 +186,64 @@ func (t *typedIntLoopTrace) remainingIterations(registers [typedTraceRegisterCou
 	}
 	counter := registers[typedTraceCounter]
 	limit := registers[typedTraceLimit]
+	step, ok := t.inductionStep()
+	if !ok {
+		return 0
+	}
+	var distance, stride uint64
+	inclusive := false
 	switch t.code[0].opcode {
 	case typedTraceExitUnlessLess:
-		if counter < limit {
-			return limit - counter
+		if step <= 0 || counter >= limit {
+			return 0
 		}
+		distance, stride = uint64(limit)-uint64(counter), uint64(step)
 	case typedTraceExitUnlessLessOrEqual:
-		if counter <= limit {
-			return limit - counter + 1
+		if step <= 0 || counter > limit {
+			return 0
 		}
+		distance, stride, inclusive = uint64(limit)-uint64(counter), uint64(step), true
 	case typedTraceExitUnlessGreater:
-		if counter > limit {
-			return counter - limit
+		if step >= 0 || counter <= limit {
+			return 0
 		}
+		distance, stride = uint64(counter)-uint64(limit), uint64(-step)
+	case typedTraceExitUnlessGreaterOrEqual:
+		if step >= 0 || counter < limit {
+			return 0
+		}
+		distance, stride, inclusive = uint64(counter)-uint64(limit), uint64(-step), true
+	default:
+		return 0
 	}
-	return 0
+	iterations := distance / stride
+	if inclusive {
+		iterations++
+	} else if distance%stride != 0 {
+		iterations++
+	}
+	const maxSignedInt64 = uint64(1<<63 - 1)
+	if iterations > maxSignedInt64 {
+		return int64(maxSignedInt64)
+	}
+	return int64(iterations)
+}
+
+func (t *typedIntLoopTrace) inductionStep() (int64, bool) {
+	if len(t.code) < 5 {
+		return 0, false
+	}
+	switch t.code[4].opcode {
+	case typedTraceIncrement:
+		return 1, true
+	case typedTraceDecrement:
+		return -1, true
+	case typedTraceAddImmediate:
+		step := int64(t.code[4].exitPC)
+		return step, step != 0
+	default:
+		return 0, false
+	}
 }
 
 type nativeTraceCompiler func(*typedIntLoopTrace) (*nativeTraceCode, error)
@@ -279,6 +326,12 @@ func (t *typedIntLoopTrace) executeGo(vm *vm, state *programTierState, registers
 				vm.pc = operation.exitPC
 				return
 			}
+		case typedTraceExitUnlessGreaterOrEqual:
+			if registers[operation.left] < registers[operation.right] {
+				t.materialize(vm, registers, t.deopts[operation.deopt].stackMap)
+				vm.pc = operation.exitPC
+				return
+			}
 		case typedTraceGuardAddRange:
 			result := registers[operation.left] + registers[operation.right]
 			if result < -maxInt || result > maxInt {
@@ -295,12 +348,20 @@ func (t *typedIntLoopTrace) executeGo(vm *vm, state *programTierState, registers
 				state.deoptTypedTrace(vm, t.deopts[operation.deopt], registers, true, true)
 				return
 			}
+		case typedTraceGuardAddImmediateRange:
+			result := registers[operation.left] + int64(operation.exitPC)
+			if result < -maxInt || result > maxInt {
+				state.deoptTypedTrace(vm, t.deopts[operation.deopt], registers, true, true)
+				return
+			}
 		case typedTraceAdd:
 			registers[operation.dst] = registers[operation.left] + registers[operation.right]
 		case typedTraceIncrement:
 			registers[operation.dst]++
 		case typedTraceDecrement:
 			registers[operation.dst]--
+		case typedTraceAddImmediate:
+			registers[operation.dst] += int64(operation.exitPC)
 		case typedTraceFloatAddLiteral:
 			ip++
 			literalBits := uint64(uint32(operation.exitPC)) | uint64(uint32(t.code[ip].exitPC))<<32
@@ -476,6 +537,105 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 				{opcode: inductionGuardOpcode, left: typedTraceCounter},
 				{opcode: typedTraceAdd, dst: typedTraceAccumulator, left: typedTraceAccumulator, right: typedTraceCounter},
 				{opcode: inductionOpcode, dst: typedTraceCounter},
+				{opcode: typedTracePollBackedge},
+				{opcode: typedTraceJump, target: 0},
+			},
+		}
+	}
+	return lowerTypedConstantStepIntegerLoopTraceAt(program, hotBackedgePC)
+}
+
+func lowerTypedConstantStepIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedIntLoopTrace {
+	for entryPC := 0; entryPC+13 <= len(program.code); entryPC++ {
+		counter, counterOK := program.code[entryPC].(loadStack)
+		limit, limitOK := program.code[entryPC+1].(loadStackLex)
+		_, lessOK := program.code[entryPC+2].(_op_lt)
+		_, lessEqualOK := program.code[entryPC+2].(_op_lte)
+		_, greaterOK := program.code[entryPC+2].(_op_gt)
+		_, greaterEqualOK := program.code[entryPC+2].(_op_gte)
+		exit, exitOK := program.code[entryPC+3].(jneP)
+		accumulator, accumulatorOK := program.code[entryPC+4].(loadStack)
+		bodyCounter, bodyCounterOK := program.code[entryPC+5].(loadStack)
+		_, bodyAddOK := program.code[entryPC+6].(_add)
+		accumulatorStore, accumulatorStoreOK := program.code[entryPC+7].(storeStackP)
+		updateCounter, updateCounterOK := program.code[entryPC+8].(loadStack)
+		stepLoad, stepLoadOK := program.code[entryPC+9].(loadVal)
+		stepOperationPC := entryPC + 10
+		_, negateStep := program.code[stepOperationPC].(_neg)
+		if negateStep {
+			stepOperationPC++
+		}
+		if stepOperationPC+2 >= len(program.code) {
+			continue
+		}
+		_, stepAddOK := program.code[stepOperationPC].(_add)
+		_, stepSubtractOK := program.code[stepOperationPC].(_sub)
+		counterStore, counterStoreOK := program.code[stepOperationPC+1].(storeStackP)
+		backedgePC := stepOperationPC + 2
+		backedge, backedgeOK := program.code[backedgePC].(jump)
+		literal, literalOK := stepLoad.v.(valueInt)
+		if !counterOK || !limitOK || !exitOK || !accumulatorOK || !bodyCounterOK || !bodyAddOK ||
+			!accumulatorStoreOK || !updateCounterOK || !stepLoadOK || !literalOK || (!stepAddOK && !stepSubtractOK) ||
+			!counterStoreOK || !backedgeOK {
+			continue
+		}
+		step := int64(literal)
+		if negateStep {
+			step = -step
+		}
+		if stepSubtractOK {
+			step = -step
+		}
+		if step < -1<<31 || step > 1<<31-1 || step >= -1 && step <= 1 {
+			continue
+		}
+		ascending := step > 0 && (lessOK || lessEqualOK)
+		descending := step < 0 && (greaterOK || greaterEqualOK)
+		if !ascending && !descending {
+			continue
+		}
+		if counter <= 0 || limit >= 0 || accumulator <= 0 || counter == accumulator ||
+			int(counter) != int(bodyCounter) || int(counter) != int(updateCounter) ||
+			int(counter) != int(counterStore) || int(accumulator) != int(accumulatorStore) ||
+			backedgePC+int(backedge) != entryPC || hotBackedgePC >= 0 && hotBackedgePC != backedgePC {
+			continue
+		}
+		exitPC := entryPC + 3 + int(exit)
+		if exit <= 0 || exitPC <= backedgePC || exitPC > len(program.code) {
+			continue
+		}
+
+		counterSlot := typedTraceStackSlot{operand: int(counter)}
+		limitSlot := typedTraceStackSlot{operand: int(limit), lexical: true}
+		accumulatorSlot := typedTraceStackSlot{operand: int(accumulator)}
+		stackMap := []typedTraceStackMapEntry{
+			{register: typedTraceCounter, slot: counterSlot},
+			{register: typedTraceLimit, slot: limitSlot},
+			{register: typedTraceAccumulator, slot: accumulatorSlot},
+		}
+		exitOpcode := typedTraceExitUnlessLess
+		switch {
+		case lessEqualOK:
+			exitOpcode = typedTraceExitUnlessLessOrEqual
+		case greaterOK:
+			exitOpcode = typedTraceExitUnlessGreater
+		case greaterEqualOK:
+			exitOpcode = typedTraceExitUnlessGreaterOrEqual
+		}
+		return &typedIntLoopTrace{
+			entryPC: entryPC,
+			guards: []typedTraceGuard{
+				{register: typedTraceCounter, slot: counterSlot},
+				{register: typedTraceLimit, slot: limitSlot},
+				{register: typedTraceAccumulator, slot: accumulatorSlot},
+			},
+			deopts: []typedTraceDeopt{{pc: entryPC, stackMap: stackMap}},
+			code: []typedTraceIR{
+				{opcode: exitOpcode, left: typedTraceCounter, right: typedTraceLimit, exitPC: exitPC},
+				{opcode: typedTraceGuardAddRange, left: typedTraceAccumulator, right: typedTraceCounter},
+				{opcode: typedTraceGuardAddImmediateRange, left: typedTraceCounter, exitPC: int(step)},
+				{opcode: typedTraceAdd, dst: typedTraceAccumulator, left: typedTraceAccumulator, right: typedTraceCounter},
+				{opcode: typedTraceAddImmediate, dst: typedTraceCounter, exitPC: int(step)},
 				{opcode: typedTracePollBackedge},
 				{opcode: typedTraceJump, target: 0},
 			},

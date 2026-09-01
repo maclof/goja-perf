@@ -56,6 +56,57 @@ func TestNativeTraceRejectsTypedFloatIR(t *testing.T) {
 	}
 }
 
+func TestNativeConstantStepTraceCompiles(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		condition instruction
+		operation instruction
+		literal   valueInt
+	}{
+		{name: "PlusTwo", condition: op_lt, operation: add, literal: 2},
+		{name: "PlusThreeInclusive", condition: op_lte, operation: add, literal: 3},
+		{name: "MinusTwo", condition: op_gt, operation: sub, literal: 2},
+		{name: "MinusNegativeThree", condition: op_lt, operation: sub, literal: -3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			trace := lowerTypedIntLoopTrace(typedConstantStepInstructionProgram(test.condition, test.operation, test.literal))
+			if trace == nil {
+				t.Fatal("constant-step loop did not lower")
+			}
+			compileNativeTraceForTest(t, trace)
+		})
+	}
+}
+
+func TestNativeConstantStepTraceLazyActivation(t *testing.T) {
+	runtime, call := setupTypedConstantStepTest(t, "typedTracePlusTwoFrom")
+	sum, counter := callTypedConstantStepTest(t, runtime, call, valueInt(0), valueInt(128), valueInt(0))
+	if sum.ToInteger() != 4032 || counter.ToInteger() != 128 {
+		t.Fatalf("tier-up result: sum/counter=%v/%v, want 4032/128", sum, counter)
+	}
+	state := typedTraceState(runtime)
+	if state == nil {
+		t.Fatal("tier-up did not produce constant-step typed IR")
+	}
+	if state.typed.nativeCode() != nil || state.typed.nativeAttempted() {
+		t.Fatal("one-off 64-iteration tier-up allocated or attempted native code")
+	}
+	if got := state.typed.nativeEligibleIterations(); got == 0 || got >= 64 {
+		t.Fatalf("lazy activation recorded %d remaining iterations, want 1..63", got)
+	}
+}
+
+func TestNativeConstantStepTraceEventuallyActivates(t *testing.T) {
+	runtime, call := setupTypedConstantStepTest(t, "typedTracePlusTwoFrom")
+	for i := 0; i < 6; i++ {
+		callTypedConstantStepTest(t, runtime, call, valueInt(0), valueInt(2000), valueInt(0))
+	}
+	state := typedTraceState(runtime)
+	if state == nil || state.typed.nativeCode() == nil || !state.typed.nativeAttempted() {
+		t.Fatal("sustained constant-step work did not install native code")
+	}
+}
+
 func setupNativeTraceTest(t *testing.T) (*Runtime, Callable, *programTierState) {
 	t.Helper()
 	runtime, call := setupTypedTraceTest(t)
@@ -230,7 +281,7 @@ func TestNativeTracePrivateABIAndWX(t *testing.T) {
 	if protection != pageExecuteRead || protection == pageReadWrite || protection == pageExecuteReadWrite {
 		t.Fatalf("native memory protection: got %#x, want PAGE_EXECUTE_READ (%#x)", protection, pageExecuteRead)
 	}
-	want, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive})
+	want, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive, step: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,6 +312,20 @@ func TestNativeTraceRejectsUnsupportedIR(t *testing.T) {
 			trace:  lowerTypedIntLoopTrace(typedInclusiveTraceInstructionProgram()),
 			mutate: func(code []typedTraceIR) { code[4].opcode = typedTraceDecrement },
 		},
+		{
+			name:  "MismatchedConstantImmediate",
+			trace: lowerTypedIntLoopTrace(typedConstantStepInstructionProgram(op_lt, add, 2)),
+			mutate: func(code []typedTraceIR) {
+				code[4].exitPC = 3
+			},
+		},
+		{
+			name:  "MismatchedConstantDirection",
+			trace: lowerTypedIntLoopTrace(typedConstantStepInstructionProgram(op_lt, add, 2)),
+			mutate: func(code []typedTraceIR) {
+				code[0].opcode = typedTraceExitUnlessGreater
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.trace.code = append([]typedTraceIR(nil), test.trace.code...)
@@ -277,7 +342,7 @@ func TestNativeTraceRejectsUnsupportedIR(t *testing.T) {
 }
 
 func TestNativeTraceEmitterRejectsUnsupportedLoopShape(t *testing.T) {
-	_, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopInclusive})
+	_, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopInclusive, step: 1})
 	if err == nil {
 		t.Fatal("emitter accepted unsupported descending-inclusive loop shape")
 	}
@@ -289,7 +354,7 @@ func TestNativeInclusiveTraceExitReasons(t *testing.T) {
 		t.Fatal("inclusive loop did not lower to typed IR")
 	}
 	native := compileNativeTraceForTest(t, trace)
-	shape := typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive}
+	shape := typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive, step: 1}
 	wantCode, err := emitNativeTraceAMD64(shape)
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +363,7 @@ func TestNativeInclusiveTraceExitReasons(t *testing.T) {
 		t.Fatalf("inclusive RX memory differs from emitted code: got %x, want %x", got, wantCode)
 	}
 	t.Logf("inclusive native trace machine code (%d bytes): %x", len(wantCode), wantCode)
-	exclusiveCode, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive})
+	exclusiveCode, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive, step: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,13 +424,100 @@ func TestNativeInclusiveTraceExitReasons(t *testing.T) {
 	}
 }
 
+func TestNativeConstantStepTraceExitReasons(t *testing.T) {
+	trace := lowerTypedIntLoopTrace(typedConstantStepInstructionProgram(op_lt, add, 2))
+	if trace == nil {
+		t.Fatal("constant-step loop did not lower")
+	}
+	native := compileNativeTraceForTest(t, trace)
+	shape, supported := nativeTraceIRLoopShape(trace)
+	if !supported {
+		t.Fatal("constant-step IR was not supported by native validator")
+	}
+	wantCode, err := emitNativeTraceAMD64(shape)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wantCode) != 214 {
+		t.Fatalf("constant-step code size: got %d, want 214", len(wantCode))
+	}
+	if got := native.memory.bytes(); !bytes.Equal(got, wantCode) {
+		t.Fatalf("constant-step RX memory differs from emitted code: got %x, want %x", got, wantCode)
+	}
+	t.Logf("constant-step native trace machine code (%d bytes): %x", len(wantCode), wantCode)
+
+	var interrupt uint32
+	var profiler int32
+	for _, test := range []struct {
+		name            string
+		frame           nativeTraceFrame
+		interrupt       uint32
+		profiler        int32
+		wantExit        nativeTraceExit
+		wantCounter     int64
+		wantAccumulator int64
+		wantBudget      uint64
+	}{
+		{name: "Normal", frame: nativeTraceFrame{counter: 0, limit: 5, accumulator: 0, budget: 8}, wantExit: nativeTraceExitNormal, wantCounter: 6, wantAccumulator: 6, wantBudget: 5},
+		{name: "ZeroTrip", frame: nativeTraceFrame{counter: 5, limit: 5, accumulator: 7, budget: 8}, wantExit: nativeTraceExitNormal, wantCounter: 5, wantAccumulator: 7, wantBudget: 8},
+		{name: "StepUpperGuard", frame: nativeTraceFrame{counter: maxInt - 1, limit: maxInt, accumulator: 0, budget: 8}, wantExit: nativeTraceExitGuard, wantCounter: maxInt - 1, wantAccumulator: 0, wantBudget: 8},
+		{name: "AddUpperGuard", frame: nativeTraceFrame{counter: 1, limit: 3, accumulator: maxInt, budget: 8}, wantExit: nativeTraceExitGuard, wantCounter: 1, wantAccumulator: maxInt, wantBudget: 8},
+		{name: "Interrupt", frame: nativeTraceFrame{counter: 0, limit: 5, accumulator: 0, budget: 8}, interrupt: 1, wantExit: nativeTraceExitInterrupt, wantCounter: 2, wantAccumulator: 0, wantBudget: 8},
+		{name: "Profiler", frame: nativeTraceFrame{counter: 0, limit: 5, accumulator: 0, budget: 8}, profiler: 1, wantExit: nativeTraceExitProfiler, wantCounter: 2, wantAccumulator: 0, wantBudget: 8},
+		{name: "BoundedYield", frame: nativeTraceFrame{counter: 0, limit: 10, accumulator: 0, budget: 2}, wantExit: nativeTraceExitYield, wantCounter: 4, wantAccumulator: 2, wantBudget: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			atomic.StoreUint32(&interrupt, test.interrupt)
+			atomic.StoreInt32(&profiler, test.profiler)
+			frame := test.frame
+			frame.interrupt, frame.profiler = &interrupt, &profiler
+			if got := native.run(&frame); got != test.wantExit {
+				t.Fatalf("exit: got %d, want %d", got, test.wantExit)
+			}
+			if frame.counter != test.wantCounter || frame.accumulator != test.wantAccumulator || frame.budget != test.wantBudget {
+				t.Fatalf("frame: counter/accumulator/budget=%d/%d/%d, want %d/%d/%d", frame.counter, frame.accumulator, frame.budget, test.wantCounter, test.wantAccumulator, test.wantBudget)
+			}
+		})
+	}
+}
+
+func TestNativeNegativeConstantStepTraceExitReasons(t *testing.T) {
+	for _, test := range []struct {
+		name                         string
+		condition                    instruction
+		literal                      valueInt
+		frame                        nativeTraceFrame
+		wantExit                     nativeTraceExit
+		wantCounter, wantAccumulator int64
+	}{
+		{name: "ExclusiveNormal", condition: op_gt, literal: 3, frame: nativeTraceFrame{counter: 10, limit: 0, budget: 8}, wantExit: nativeTraceExitNormal, wantCounter: -2, wantAccumulator: 22},
+		{name: "InclusiveNormal", condition: op_gte, literal: 2, frame: nativeTraceFrame{counter: 0, limit: 0, budget: 8}, wantExit: nativeTraceExitNormal, wantCounter: -2, wantAccumulator: 0},
+		{name: "StepLowerGuard", condition: op_gt, literal: 3, frame: nativeTraceFrame{counter: -maxInt + 1, limit: -maxInt, budget: 8}, wantExit: nativeTraceExitGuard, wantCounter: -maxInt + 1, wantAccumulator: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			trace := lowerTypedIntLoopTrace(typedConstantStepInstructionProgram(test.condition, sub, test.literal))
+			native := compileNativeTraceForTest(t, trace)
+			var interrupt uint32
+			var profiler int32
+			frame := test.frame
+			frame.interrupt, frame.profiler = &interrupt, &profiler
+			if got := native.run(&frame); got != test.wantExit {
+				t.Fatalf("exit: got %d, want %d", got, test.wantExit)
+			}
+			if frame.counter != test.wantCounter || frame.accumulator != test.wantAccumulator {
+				t.Fatalf("counter/accumulator=%d/%d, want %d/%d", frame.counter, frame.accumulator, test.wantCounter, test.wantAccumulator)
+			}
+		})
+	}
+}
+
 func TestNativeDescendingTraceExitReasons(t *testing.T) {
 	trace := lowerTypedIntLoopTrace(typedDescendingTraceInstructionProgram())
 	if trace == nil {
 		t.Fatal("descending loop did not lower to typed IR")
 	}
 	native := compileNativeTraceForTest(t, trace)
-	wantCode, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive})
+	wantCode, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive, step: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +525,7 @@ func TestNativeDescendingTraceExitReasons(t *testing.T) {
 		t.Fatalf("descending RX memory differs from emitted code: got %x, want %x", got, wantCode)
 	}
 	t.Logf("descending native trace machine code (%d bytes): %x", len(wantCode), wantCode)
-	ascendingCode, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive})
+	ascendingCode, err := emitNativeTraceAMD64(typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive, step: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,6 +706,29 @@ func TestNativeInclusiveTraceRuntimeExecutionAndYield(t *testing.T) {
 	}
 	if got := native.yields.Load(); got != 2 {
 		t.Fatalf("bounded inclusive yields: got %d, want 2", got)
+	}
+}
+
+func TestNativeConstantStepTraceRuntimeExecutionAndYield(t *testing.T) {
+	runtime, call := setupTypedConstantStepTest(t, "typedTracePlusTwoFrom")
+	for i := 0; i < 6; i++ {
+		callTypedConstantStepTest(t, runtime, call, valueInt(0), valueInt(2000), valueInt(0))
+	}
+	state := typedTraceState(runtime)
+	if state == nil || state.typed.nativeCode() == nil {
+		t.Fatal("constant-step loop did not activate native code")
+	}
+	native := state.typed.nativeCode()
+	native.yields.Store(0)
+	iterations := int64(nativeTraceIterationBudget*2 + 7)
+	limit := iterations * 2
+	sum, counter := callTypedConstantStepTest(t, runtime, call, valueInt(0), valueInt(limit), valueInt(0))
+	want := iterations * (iterations - 1)
+	if sum.ToInteger() != want || counter.ToInteger() != limit {
+		t.Fatalf("yielded result: sum/counter=%v/%v, want %d/%d", sum, counter, want, limit)
+	}
+	if got := native.yields.Load(); got != 2 {
+		t.Fatalf("bounded constant-step yields: got %d, want 2", got)
 	}
 }
 
