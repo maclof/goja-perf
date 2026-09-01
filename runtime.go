@@ -485,6 +485,10 @@ func (r *Runtime) newSyntaxError(msg string, offset int) Value {
 }
 
 func newBaseObjectObj(obj, proto *Object, class string) *baseObject {
+	return newBaseObjectObjWithCapacity(obj, proto, class, 0)
+}
+
+func newBaseObjectObjWithCapacity(obj, proto *Object, class string, capacity int) *baseObject {
 	o := &baseObject{
 		class:      class,
 		val:        obj,
@@ -492,7 +496,7 @@ func newBaseObjectObj(obj, proto *Object, class string) *baseObject {
 		prototype:  proto,
 	}
 	obj.self = o
-	o.init()
+	o.initWithCapacity(capacity)
 	return o
 }
 
@@ -509,6 +513,11 @@ func newGuardedObj(proto *Object, class string) *guardedObject {
 func (r *Runtime) newBaseObject(proto *Object, class string) (o *baseObject) {
 	v := &Object{runtime: r}
 	return newBaseObjectObj(v, proto, class)
+}
+
+func (r *Runtime) newBaseObjectWithCapacity(proto *Object, class string, capacity int) (o *baseObject) {
+	v := &Object{runtime: r}
+	return newBaseObjectObjWithCapacity(v, proto, class, capacity)
 }
 
 func (r *Runtime) newGuardedObject(proto *Object, class string) (o *guardedObject) {

@@ -281,7 +281,14 @@ func (f ConstructorCall) Argument(idx int) Value {
 }
 
 func (o *baseObject) init() {
-	o.values = make(map[unistring.String]Value)
+	o.initWithCapacity(0)
+}
+
+func (o *baseObject) initWithCapacity(capacity int) {
+	o.values = make(map[unistring.String]Value, capacity)
+	if capacity > 0 {
+		o.propNames = make([]unistring.String, 0, capacity)
+	}
 }
 
 func (o *baseObject) className() string {

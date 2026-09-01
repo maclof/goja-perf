@@ -122,6 +122,72 @@ func TestObjectShorthandProperties(t *testing.T) {
 	testScriptWithTestLib(SCRIPT, _undefined, t)
 }
 
+func TestObjectLiteralCapacityHintSemantics(t *testing.T) {
+	const SCRIPT = `
+	var proto = {inherited: 7};
+	var computed = "computed";
+	var source = {spread: 3};
+	var object = {
+		first: 1,
+		__proto__: proto,
+		[computed]: 2,
+		...source,
+		duplicate: 1,
+		duplicate: 4,
+		get pair() { return this._pair || 5; },
+		set pair(value) { this._pair = value; }
+	};
+
+	assert.sameValue(Object.getPrototypeOf(object), proto);
+	assert.sameValue(object.inherited, 7);
+	assert.sameValue(object.computed, 2);
+	assert.sameValue(object.spread, 3);
+	assert.sameValue(object.duplicate, 4);
+	assert.sameValue(object.pair, 5);
+	object.pair = 9;
+	assert.sameValue(object.pair, 9);
+	assert(compareArray(Object.keys(object), ["first", "computed", "spread", "duplicate", "pair", "_pair"]));
+	delete object.first;
+	object.first = 10;
+	assert(compareArray(Object.keys(object), ["computed", "spread", "duplicate", "pair", "_pair", "first"]));
+	`
+
+	testScriptWithTestLib(SCRIPT, _undefined, t)
+}
+
+func TestObjectLiteralCapacityInstruction(t *testing.T) {
+	for _, test := range []struct {
+		source       string
+		wantCapacity newObjectWithCapacity
+		wantPlain    bool
+	}{
+		{source: `({})`, wantPlain: true},
+		{source: `({...null})`, wantPlain: true},
+		{source: `({__proto__: null})`, wantPlain: true},
+		{source: `({[Symbol()]: 1})`, wantPlain: true},
+		{source: `({a: 1, a: 2})`, wantCapacity: 1},
+		{source: `({a: 1, ...{}, b: 2})`, wantCapacity: 2},
+	} {
+		program := MustCompile("literal.js", test.source, false)
+		var capacity newObjectWithCapacity
+		plain := false
+		for _, instruction := range program.code {
+			switch instruction := instruction.(type) {
+			case newObjectWithCapacity:
+				capacity = instruction
+				goto found
+			case _newObject:
+				plain = true
+				goto found
+			}
+		}
+	found:
+		if capacity != test.wantCapacity || plain != test.wantPlain {
+			t.Errorf("%s: got capacity=%d, plain=%t; want capacity=%d, plain=%t", test.source, capacity, plain, test.wantCapacity, test.wantPlain)
+		}
+	}
+}
+
 func TestObjectAssign(t *testing.T) {
 	const SCRIPT = `
 	assert.sameValue(Object.assign({ b: 1 }, { get a() {

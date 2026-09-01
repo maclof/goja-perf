@@ -2835,7 +2835,16 @@ func (c *compiler) compileLogicalAnd(left, right ast.Expression, idx file.Idx) c
 
 func (e *compiledObjectLiteral) emitGetter(putOnStack bool) {
 	e.addSrcMap()
-	e.c.emit(newObject)
+	newObjectMark := len(e.c.p.code)
+	e.c.emit(nil)
+	capacity := uint32(0)
+	staticKeys := make(map[unistring.String]struct{})
+	countStaticKey := func(key unistring.String) {
+		if _, exists := staticKeys[key]; !exists {
+			staticKeys[key] = struct{}{}
+			capacity++
+		}
+	}
 	hasProto := false
 	for _, prop := range e.expr.Value {
 		switch prop := prop.(type) {
@@ -2881,6 +2890,9 @@ func (e *compiledObjectLiteral) emitGetter(putOnStack bool) {
 				}
 			} else {
 				isProto := key == __proto__ && !prop.Computed
+				if !isProto || prop.Kind != ast.PropertyKindValue {
+					countStaticKey(key)
+				}
 				if isProto {
 					if hasProto {
 						e.c.throwSyntaxError(int(prop.Idx0())-1, "Duplicate __proto__ fields are not allowed in object literals")
@@ -2913,6 +2925,7 @@ func (e *compiledObjectLiteral) emitGetter(putOnStack bool) {
 			}
 		case *ast.PropertyShort:
 			key := prop.Name.Name
+			countStaticKey(key)
 			if prop.Initializer != nil {
 				e.c.throwSyntaxError(int(prop.Initializer.Idx0())-1, "Invalid shorthand property initializer")
 			}
@@ -2928,6 +2941,11 @@ func (e *compiledObjectLiteral) emitGetter(putOnStack bool) {
 			e.c.assert(false, e.offset, "unknown Property type: %T", prop)
 			panic("unreachable")
 		}
+	}
+	if capacity == 0 {
+		e.c.p.code[newObjectMark] = newObject
+	} else {
+		e.c.p.code[newObjectMark] = newObjectWithCapacity(capacity)
 	}
 	if !putOnStack {
 		e.c.emit(pop)

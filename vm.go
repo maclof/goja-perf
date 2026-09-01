@@ -2796,6 +2796,13 @@ func (_newObject) exec(vm *vm) {
 	vm.pc++
 }
 
+type newObjectWithCapacity uint32
+
+func (capacity newObjectWithCapacity) exec(vm *vm) {
+	vm.push(vm.r.newBaseObjectWithCapacity(vm.r.global.ObjectPrototype, classObject, int(capacity)).val)
+	vm.pc++
+}
+
 type newArray uint32
 
 func (l newArray) exec(vm *vm) {
