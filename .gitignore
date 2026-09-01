@@ -1,3 +1,7 @@
 .idea
 *.iml
 testdata/test262
+*.test
+*.test.exe
+*.pprof
+/step_*.txt

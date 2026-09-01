@@ -1,3 +1,26 @@
+# Goja Performance Fork
+
+This repository tracks the upstream [`dop251/goja`](https://github.com/dop251/goja)
+source and focuses on reproducible benchmarks and evidence-driven performance
+improvements.
+
+The benchmark program targets JavaScript execution, JavaScript calls into
+Go-defined functions and methods, Go calls into JavaScript functions, and mixed
+workloads that cross the runtime boundary in both directions. Runtime setup and
+steady-state execution should be measured separately, with execution time and
+allocations compared over multiple samples.
+
+Typical verification commands are:
+
+```sh
+go test ./...
+go test -run '^$' -bench . -benchmem -count=10 ./...
+```
+
+The original upstream documentation follows.
+
+---
+
 goja
 ====
 
