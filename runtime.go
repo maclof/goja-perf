@@ -2681,6 +2681,12 @@ func createDataPropertyOrThrow(o *Object, p Value, v Value) {
 }
 
 func toPropertyKey(key Value) Value {
+	// ToString() is an identity for these primitive representations. Returning
+	// the original interface avoids redundant dispatch and re-boxing.
+	switch key.(type) {
+	case asciiString, unicodeString, valueInt, valueFloat:
+		return key
+	}
 	return key.ToString()
 }
 
