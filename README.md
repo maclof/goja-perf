@@ -1,26 +1,137 @@
-# Goja Performance Fork
+# goja-perf
 
-This repository tracks the upstream [`dop251/goja`](https://github.com/dop251/goja)
-source and focuses on reproducible benchmarks and evidence-driven performance
-improvements.
+`goja-perf` is a performance-focused, API-compatible fork of
+[`dop251/goja`](https://github.com/dop251/goja). It keeps upstream Goja's pure-Go
+JavaScript engine and public import path, while adding measured execution and
+Go/JavaScript-boundary optimizations, a representative benchmark suite, and an
+opt-in capability sandbox. It is intended as a drop-in replacement, but it is an
+independent fork rather than an upstream Goja release.
 
-The benchmark program targets JavaScript execution, JavaScript calls into
-Go-defined functions and methods, Go calls into JavaScript functions, and mixed
-workloads that cross the runtime boundary in both directions. Runtime setup and
-steady-state execution should be measured separately, with execution time and
-allocations compared over multiple samples.
+## What is different
 
-Typical verification commands are:
+- Hot code progresses through adaptive quickening and typed traces. Supported
+  numeric loop shapes include guarded integer and floating-point accumulation;
+  integer counter loops cover ascending/descending, inclusive/exclusive, and
+  constant-step forms. Eligible integer traces can compile to native code on
+  Windows/amd64 and Linux/amd64. Other platforms use the portable typed Go
+  executor.
+- Boundary paths avoid redundant primitive boxing, reuse bounded VM stack
+  storage, cache reflected Go method templates, reduce object-export cache
+  overhead, reuse quickened global references, and preallocate object literals.
+- Benchmarks separately cover JavaScript execution, runtime setup/compilation,
+  JavaScript calling Go functions and methods, Go calling JavaScript, mixed
+  bidirectional calls, and primitive/object/slice/map/struct values. The
+  [`benchjs`](benchjs/README.md) suite compares identical pure-JavaScript
+  workloads with V8.
+- [`NewSandbox`](SANDBOX.md) provides opt-in built-in allow/deny policy, explicit
+  host capabilities, dynamic-code control, serialized runtime access, reset,
+  and wall-clock execution timeouts. Ordinary `goja.New()` runtimes are
+  unchanged.
+
+## Measured performance
+
+These are the statistically significant rows from a controlled comparison of
+fork commit `35cc441` with its exact upstream merge base `8f1c069`. Ten samples
+per version were interleaved on Go 1.26.2, Windows/amd64, AMD Ryzen 9 PRO 7940HS.
+Of 55 shared benchmarks, seven improved significantly and none had a significant
+timing regression.
+
+| Benchmark | Upstream time | goja-perf time | Speedup | B/op (upstream → fork) | allocs/op (upstream → fork) |
+|---|---:|---:|---:|---:|---:|
+| `MainLoop` | 24.541 ms | 98.277 µs | 249.71× | 5,598,185 → 324 | 199,748 → 40 |
+| `CallJS` | 267.10 ns | 93.56 ns | 2.86× | 224 → 0 | 3 → 0 |
+| `CallNative` | 191.60 ns | 92.67 ns | 2.07× | 96 → 0 | 2 → 0 |
+| `VmNOP2` | 1.483 ns | 0.7576 ns | 1.96× | 0 → 0 | 0 → 0 |
+| `FuncCall` | 280.95 ns | 155.45 ns | 1.81× | 400 → 112 | 2 → 1 |
+| `MapDelete` | 570.00 ns | 384.70 ns | 1.48× | 480 → 480 | 5 → 5 |
+| `CallReflect` | 1.068 µs | 768.50 ns | 1.39× | 120 → 24 | 4 → 2 |
+
+The table is evidence for these workloads and this machine, not a promise that
+every program receives the same speedup. Benefits depend on workload shape,
+warmup, data types, platform, and how often code crosses the Go/JavaScript
+boundary.
+
+## Install as a drop-in replacement
+
+Keep existing imports unchanged:
+
+```go
+import "github.com/dop251/goja"
+```
+
+Require Goja normally, then replace it with a tagged goja-perf release:
+
+```sh
+go get github.com/dop251/goja@latest
+go mod edit -replace=github.com/dop251/goja=github.com/maclof/goja-perf@v0.1.0
+go mod tidy
+go test ./...
+```
+
+The resulting `go.mod` contains a rule like:
+
+```go.mod
+replace github.com/dop251/goja => github.com/maclof/goja-perf v0.1.0
+```
+
+This repository deliberately retains `module github.com/dop251/goja` in its own
+`go.mod`: existing source code and dependent modules continue to agree on one
+Go type identity and no imports need rewriting. The consumer-side `replace`
+selects this fork's source. Pin a release tag for reproducible builds. To test a
+specific commit or branch before a release, substitute its pseudo-version or
+`@master`; `go mod tidy` resolves a branch to a pseudo-version.
+
+## Sandbox example
+
+The default sandbox policy denies all policy-controlled built-ins and all host
+capabilities. Each `Capabilities` map key becomes a JavaScript global name, and
+its value is the Go function or value available at that name. If it is absent,
+the script has no access to it. Standard JavaScript built-ins such as `JSON` and
+`Math` are configured separately through `Builtins`. This is the sandbox-safe
+replacement for calling `Runtime.Set` on the wrapped runtime. Grant only what a
+script needs:
+
+```go
+sandbox, err := goja.NewSandbox(goja.SandboxPolicy{
+	Builtins: goja.SandboxBuiltins{
+		Allow: []string{"JSON", "Math"}, // allowlist (whitelist)
+	},
+	Capabilities: map[string]interface{}{
+		"lookupPrice": func(id string) float64 { return prices[id] },
+	},
+	ExecutionTimeout: 100 * time.Millisecond,
+})
+if err != nil {
+	return err // invalid policy
+}
+
+value, err := sandbox.RunString(`
+	JSON.stringify({price: Math.round(lookupPrice("sku-42") * 100) / 100})
+`)
+if errors.Is(err, goja.ErrSandboxTimeout) {
+	return fmt.Errorf("script timed out: %w", err)
+}
+if err != nil {
+	return fmt.Errorf("script failed: %w", err)
+}
+_ = value
+```
+
+For blacklist-style policy, use
+`SandboxBuiltins{AllowAll: true, Deny: []string{"Date", "eval"}}` instead.
+Normal script-defined functions, closures, object methods, and class methods
+still work. By default, only runtime compilation through `eval` and the
+`Function` constructor family is blocked.
+Read [SANDBOX.md](SANDBOX.md) before running untrusted code: granted Go values
+are trusted, native Go calls cannot be preempted, and memory/CPU quotas still
+require process or container limits.
+
+## Benchmarking
 
 ```sh
 go test ./...
 go test -run '^$' -bench . -benchmem -count=10 ./...
 ```
-
-For running untrusted JavaScript with an explicit set of host capabilities,
-standard-global policy, dynamic-code restriction, and execution timeout, see
-[Sandboxing](SANDBOX.md). The sandbox is opt-in; ordinary `goja.New()` behavior
-is unchanged.
 
 The original upstream documentation follows.
 

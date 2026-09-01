@@ -48,12 +48,67 @@ reserved names cannot be replaced. The map is copied when the sandbox is
 created, and `Reset` creates a fresh runtime with the original policy and
 capabilities. JavaScript state otherwise persists between runs.
 
+## Host capabilities
+
+`Capabilities` is the bridge from JavaScript to the embedding Go application.
+Each map key becomes a JavaScript global name and each map value is the Go value
+or function exposed at that name. Supplying this map when creating a sandbox is
+the sandbox equivalent of using `Runtime.Set` to install host-provided globals;
+the wrapped runtime is intentionally not exposed for later mutation:
+
+```go
+sandbox, err := goja.NewSandbox(goja.SandboxPolicy{
+	Capabilities: map[string]interface{}{
+		"add": func(a, b int) int { return a + b },
+	},
+})
+// The script can call add(20, 22). It cannot access other application code.
+```
+
+An absent entry means no host access under that name. Standard JavaScript
+built-ins are not capabilities: configure them separately with `Builtins.Allow`
+or `Builtins.AllowAll` and `Builtins.Deny`.
+
+Prefer narrow wrapper functions that validate their inputs and perform one
+specific operation:
+
+```go
+Capabilities: map[string]interface{}{
+	"readPublicSetting": func(name string) (string, error) {
+		if name != "theme" {
+			return "", errors.New("setting is not script-readable")
+		}
+		return settings.Theme, nil
+	},
+}
+```
+
+Avoid exposing a broad application, database, filesystem, HTTP client, or
+service object:
+
+```go
+// Unsafe for untrusted scripts: every exported field and method may become
+// reachable, including operations with side effects.
+Capabilities: map[string]interface{}{
+	"app": application,
+}
+```
+
+The capabilities map itself is copied, but its values are not deep-copied or
+made read-only. Pointers, maps, slices, structs, and functions may share host
+state, and their methods or calls may perform arbitrary side effects. In
+particular, exposing a Go struct or pointer grants scripts its Goja-visible
+exported fields and method surface. Treat every granted value as fully trusted
+authority and prefer narrow wrapper functions.
+
 Dynamic code generation is denied unless `AllowDynamicCode` is true. The check
 is enforced at Goja's central eval path, so it covers direct and indirect
 `eval`, the global `Function` constructor, and Function, AsyncFunction, and
 GeneratorFunction constructors reached through prototypes or a function's
 `constructor` property. Removing only the global names would not provide this
-protection.
+protection. Ordinary function declarations, closures, object methods, and class
+methods defined in the original script still work; this policy blocks runtime
+source compilation, not normal JavaScript functions.
 
 `ExecutionTimeout` uses Goja's interrupt mechanism. A sandbox serializes calls,
 stops and synchronizes its timer callback, and clears any stale interrupt before
