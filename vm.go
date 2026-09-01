@@ -36,6 +36,7 @@ type stash struct {
 
 type context struct {
 	prg       *Program
+	tier      *programTierState
 	stash     *stash
 	privEnv   *privateEnv
 	newTarget Value
@@ -357,11 +358,16 @@ func (r *unresolvedRef) refname() unistring.String {
 }
 
 type vm struct {
-	r            *Runtime
-	prg          *Program
-	pc           int
-	stack        valueStack
-	sp, sb, args int
+	r                    *Runtime
+	prg                  *Program
+	tier                 *programTierState
+	tiering              runtimeTiering
+	tierCandidateProgram *Program
+	tierCandidatePC      int32
+	tierCandidateCount   uint8
+	pc                   int
+	stack                valueStack
+	sp, sb, args         int
 
 	stash     *stash
 	privEnv   *privateEnv
@@ -665,7 +671,11 @@ func (vm *vm) runWithProfiler() bool {
 		if pc < 0 || pc >= len(vm.prg.code) {
 			break
 		}
-		vm.prg.code[pc].exec(vm)
+		code := vm.prg.code
+		if vm.tier != nil && vm.tier.quickProgram == vm.prg {
+			code = vm.tier.program.code
+		}
+		code[pc].exec(vm)
 		req := atomic.LoadInt32(&pt.req)
 		if req == profReqStop {
 			return true
@@ -808,8 +818,8 @@ func (vm *vm) handleThrow(arg interface{}) *Exception {
 		}
 		if int(tf.callStackLen) < len(vm.callStack) {
 			ctx := &vm.callStack[tf.callStackLen]
-			vm.prg, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args =
-				ctx.prg, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args
+			vm.prg, vm.tier, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args =
+				ctx.prg, ctx.tier, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args
 			vm.callStack = vm.callStack[:tf.callStackLen]
 		}
 		vm.sp = int(tf.sp)
@@ -904,8 +914,8 @@ func (vm *vm) peek() Value {
 }
 
 func (vm *vm) saveCtx(ctx *context) {
-	ctx.prg, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args =
-		vm.prg, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args
+	ctx.prg, ctx.tier, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args =
+		vm.prg, vm.tier, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args
 }
 
 func (vm *vm) pushCtx() {
@@ -920,8 +930,8 @@ func (vm *vm) pushCtx() {
 }
 
 func (vm *vm) restoreCtx(ctx *context) {
-	vm.prg, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args =
-		ctx.prg, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args
+	vm.prg, vm.tier, vm.stash, vm.privEnv, vm.newTarget, vm.result, vm.pc, vm.sb, vm.args =
+		ctx.prg, ctx.tier, ctx.stash, ctx.privEnv, ctx.newTarget, ctx.result, ctx.pc, ctx.sb, ctx.args
 }
 
 func (vm *vm) popCtx() {
@@ -1877,6 +1887,9 @@ func (_shr) exec(vm *vm) {
 type jump int32
 
 func (j jump) exec(vm *vm) {
+	if j < 0 {
+		vm.recordBackedge(vm.pc)
+	}
 	vm.pc += int(j)
 }
 
@@ -4363,6 +4376,9 @@ type jeqP int32
 func (j jeqP) exec(vm *vm) {
 	vm.sp--
 	if vm.stack[vm.sp].ToBoolean() {
+		if j < 0 {
+			vm.recordBackedge(vm.pc)
+		}
 		vm.pc += int(j)
 	} else {
 		vm.pc++

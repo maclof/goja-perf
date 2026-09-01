@@ -69,6 +69,10 @@ type srcMapItem struct {
 // It is always preferable to use a Program over a string when running code as it skips the compilation step.
 type Program struct {
 	code []instruction
+	// hasBackedge is immutable after compilation. Mutable counters and
+	// quickened code remain Runtime-owned because Programs are concurrently
+	// reusable.
+	hasBackedge bool
 
 	funcName unistring.String
 	src      *file.File
@@ -1272,6 +1276,19 @@ func (c *compiler) compileStandaloneFunctionDecl(v *ast.FunctionDeclaration) {
 }
 
 func (c *compiler) emit(instructions ...instruction) {
+	// Current compiler loop shapes use jump for for/while/for-in/for-of
+	// backedges and jeqP for do-while backedges. Other relative branches are
+	// forward-only exits and expression short-circuits; tiering tests enumerate
+	// every relative instruction and compiler loop form to keep this invariant
+	// explicit.
+	for _, ins := range instructions {
+		switch ins := ins.(type) {
+		case jump:
+			c.p.hasBackedge = c.p.hasBackedge || ins < 0
+		case jeqP:
+			c.p.hasBackedge = c.p.hasBackedge || ins < 0
+		}
+	}
 	c.p.code = append(c.p.code, instructions...)
 }
 

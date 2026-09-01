@@ -867,7 +867,7 @@ func (p *proxyObject) assertCallable() (call func(FunctionCall) Value, ok bool) 
 
 func (p *proxyObject) vmCall(vm *vm, n int) {
 	vm.pushCtx()
-	vm.prg = nil
+	vm.setProgram(nil)
 	vm.sb = vm.sp - n // so that [sb-1] points to the callee
 	ret := p.apply(FunctionCall{This: vm.stack[vm.sp-n-2], Arguments: vm.stack[vm.sp-n : vm.sp]})
 	if ret == nil {

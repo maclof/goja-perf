@@ -326,7 +326,7 @@ func (f *classFuncObject) _initFields(instance *Object) {
 	if f.initFields != nil {
 		vm := f.val.runtime.vm
 		vm.pushCtx()
-		vm.prg = f.initFields
+		vm.setProgram(f.initFields)
 		vm.stash = f.stash
 		vm.privEnv = f.privEnv
 		vm.newTarget = nil
@@ -425,7 +425,7 @@ func (f *baseJsFuncObject) __call(args []Value, newTarget, this Value) (Value, *
 	}
 
 	vm.args = len(args)
-	vm.prg = f.prg
+	f.setVmProgram(vm)
 	vm.stash = f.stash
 	vm.privEnv = f.privEnv
 	vm.newTarget = newTarget
@@ -444,6 +444,15 @@ func (f *baseJsFuncObject) __call(args []Value, newTarget, this Value) (Value, *
 	}
 
 	return vm.pop(), nil
+}
+
+func (f *baseJsFuncObject) setVmProgram(vm *vm) {
+	if !f.prg.hasBackedge {
+		vm.prg = f.prg
+		vm.tier = nil
+		return
+	}
+	vm.setProgram(f.prg)
 }
 
 func (f *baseJsFuncObject) _call(args []Value, newTarget, this Value) Value {
@@ -481,7 +490,7 @@ func (f *funcObject) assertConstructor() func(args []Value, newTarget *Object) *
 func (f *baseJsFuncObject) vmCall(vm *vm, n int) {
 	vm.pushCtx()
 	vm.args = n
-	vm.prg = f.prg
+	f.setVmProgram(vm)
 	vm.stash = f.stash
 	vm.privEnv = f.privEnv
 	vm.pc = 0
@@ -495,7 +504,7 @@ func (f *arrowFuncObject) assertCallable() (func(FunctionCall) Value, bool) {
 func (f *arrowFuncObject) vmCall(vm *vm, n int) {
 	vm.pushCtx()
 	vm.args = n
-	vm.prg = f.prg
+	f.setVmProgram(vm)
 	vm.stash = f.stash
 	vm.privEnv = f.privEnv
 	vm.pc = 0
@@ -566,7 +575,7 @@ func (f *nativeFuncObject) assertCallable() (func(FunctionCall) Value, bool) {
 func (f *nativeFuncObject) vmCall(vm *vm, n int) {
 	if f.f != nil {
 		vm.pushCtx()
-		vm.prg = nil
+		vm.setProgram(nil)
 		vm.sb = vm.sp - n // so that [sb-1] points to the callee
 		ret := f.f(FunctionCall{
 			Arguments: vm.stack[vm.sp-n : vm.sp],
@@ -762,7 +771,8 @@ func (g *generator) storeLengths() {
 func (g *generator) enter() {
 	g.vm.pushCtx()
 	g.vm.pushTryFrame(tryPanicMarker, -1)
-	g.vm.prg, g.vm.sb, g.vm.pc = nil, -1, -2 // so that vm.run() halts after ret
+	g.vm.setProgram(nil)
+	g.vm.sb, g.vm.pc = -1, -2 // so that vm.run() halts after ret
 	g.storeLengths()
 }
 

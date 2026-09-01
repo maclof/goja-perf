@@ -943,7 +943,7 @@ func (r *Runtime) eval(srcVal String, direct, strict bool) Value {
 		panic(err)
 	}
 
-	vm.prg = p
+	vm.setProgram(p)
 	vm.pc = 0
 	vm.args = 0
 	vm.result = _undefined
@@ -1467,7 +1467,7 @@ func (r *Runtime) RunProgram(p *Program) (result Value, err error) {
 	} else {
 		vm.callStack = append(vm.callStack, context{})
 	}
-	vm.prg = p
+	vm.setProgram(p)
 	vm.pc = 0
 	vm.result = _undefined
 	ex := vm.runTry()
@@ -1479,7 +1479,7 @@ func (r *Runtime) RunProgram(p *Program) (result Value, err error) {
 	if recursive {
 		vm.clearStack()
 	} else {
-		vm.prg = nil
+		vm.setProgram(nil)
 		vm.sb = -1
 		r.leave()
 	}
