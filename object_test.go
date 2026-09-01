@@ -165,6 +165,108 @@ func TestExportCircular(t *testing.T) {
 	}
 }
 
+func TestObjectExportCtxInlineAndPromotion(t *testing.T) {
+	runtime := New()
+	object := runtime.NewObject()
+	sliceType := reflect.TypeOf([]int(nil))
+	mapType := reflect.TypeOf(map[string]int(nil))
+	sliceValue := []int{1}
+	mapValue := map[string]int{"value": 2}
+
+	var ctx objectExportCtx
+	ctx.putTyped(object, sliceType, sliceValue)
+	if value, ok := ctx.getTyped(object, sliceType); !ok || !reflect.DeepEqual(value, sliceValue) {
+		t.Fatalf("inline typed value: value=%v ok=%v", value, ok)
+	}
+	if _, ok := ctx.get(object); ok {
+		t.Fatal("typed value unexpectedly matched the object's natural export type")
+	}
+
+	ctx.putTyped(object, mapType, mapValue)
+	if value, ok := ctx.getTyped(object, sliceType); !ok || !reflect.DeepEqual(value, sliceValue) {
+		t.Fatalf("promoted slice value: value=%v ok=%v", value, ok)
+	}
+	if value, ok := ctx.getTyped(object, mapType); !ok || !reflect.DeepEqual(value, mapValue) {
+		t.Fatalf("promoted map value: value=%v ok=%v", value, ok)
+	}
+
+	naturalValue := map[string]interface{}{"value": 3}
+	ctx.put(object, naturalValue)
+	if value, ok := ctx.get(object); !ok || !reflect.DeepEqual(value, naturalValue) {
+		t.Fatalf("promoted natural value: value=%v ok=%v", value, ok)
+	}
+
+	other := runtime.NewObject()
+	var direct objectExportCtx
+	direct.put(other, naturalValue)
+	if value, ok := direct.get(other); !ok || !reflect.DeepEqual(value, naturalValue) {
+		t.Fatalf("inline natural value: value=%v ok=%v", value, ok)
+	}
+	direct.putTyped(other, reflect.TypeOf(naturalValue), map[string]interface{}{"value": 4})
+	if value, ok := direct.get(other); !ok || !reflect.DeepEqual(value, map[string]interface{}{"value": 4}) {
+		t.Fatalf("updated inline natural value: value=%v ok=%v", value, ok)
+	}
+	third := runtime.NewObject()
+	thirdValue := []interface{}{5}
+	direct.put(third, thirdValue)
+	if value, ok := direct.get(third); !ok || !reflect.DeepEqual(value, thirdValue) {
+		t.Fatalf("second object value: value=%v ok=%v", value, ok)
+	}
+	if value, ok := direct.get(other); !ok || !reflect.DeepEqual(value, map[string]interface{}{"value": 4}) {
+		t.Fatalf("first object after promotion: value=%v ok=%v", value, ok)
+	}
+
+	var incompatible objectExportCtx
+	incompatible.put(object, naturalValue)
+	incompatible.putTyped(object, sliceType, sliceValue)
+	if value, ok := incompatible.get(object); !ok || !reflect.DeepEqual(value, naturalValue) {
+		t.Fatalf("natural value after incompatible typed promotion: value=%v ok=%v", value, ok)
+	}
+	if value, ok := incompatible.getTyped(object, sliceType); !ok || !reflect.DeepEqual(value, sliceValue) {
+		t.Fatalf("typed value after incompatible typed promotion: value=%v ok=%v", value, ok)
+	}
+
+	var typedNatural objectExportCtx
+	naturalType := object.self.exportType()
+	typedNatural.putTyped(object, naturalType, naturalValue)
+	replacement := map[string]interface{}{"value": 6}
+	typedNatural.put(object, replacement)
+	if value, ok := typedNatural.get(object); !ok || !reflect.DeepEqual(value, replacement) {
+		t.Fatalf("untyped replacement of typed natural value: value=%v ok=%v", value, ok)
+	}
+	if value, ok := typedNatural.getTyped(object, naturalType); !ok || !reflect.DeepEqual(value, replacement) {
+		t.Fatalf("typed lookup after untyped replacement: value=%v ok=%v", value, ok)
+	}
+}
+
+func TestObjectExportCtxReentrant(t *testing.T) {
+	runtime := New()
+	nested, err := runtime.RunString(`({value: 42})`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Set("reentrantExport", func() int {
+		var result map[string]int
+		if err := runtime.ExportTo(nested, &result); err != nil {
+			panic(err)
+		}
+		return result["value"]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	value, err := runtime.RunString(`({get Count() { return reentrantExport(); }})`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct{ Count int }
+	if err := runtime.ExportTo(value, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 42 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
 type test_s struct {
 	S *test_s1
 }

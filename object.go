@@ -142,8 +142,19 @@ func (p *PropertyDescriptor) complete() {
 
 type objectExportCacheItem map[reflect.Type]interface{}
 
+type objectExportCacheEntry struct {
+	key   *Object
+	typ   reflect.Type // nil for an untyped Export() entry
+	value interface{}
+}
+
+type objectExportCache struct {
+	first    objectExportCacheEntry
+	overflow map[*Object]interface{}
+}
+
 type objectExportCtx struct {
-	cache map[*Object]interface{}
+	cache *objectExportCache
 }
 
 type objectImpl interface {
@@ -1669,7 +1680,16 @@ func (o *guardedObject) deleteStr(name unistring.String, throw bool) bool {
 }
 
 func (ctx *objectExportCtx) get(key *Object) (interface{}, bool) {
-	if v, exists := ctx.cache[key]; exists {
+	cache := ctx.cache
+	if cache == nil {
+		return nil, false
+	}
+	if cache.first.key == key {
+		if cache.first.typ == nil || cache.first.typ == key.self.exportType() {
+			return cache.first.value, true
+		}
+	}
+	if v, exists := cache.overflow[key]; exists {
 		if item, ok := v.(objectExportCacheItem); ok {
 			r, exists := item[key.self.exportType()]
 			return r, exists
@@ -1681,7 +1701,20 @@ func (ctx *objectExportCtx) get(key *Object) (interface{}, bool) {
 }
 
 func (ctx *objectExportCtx) getTyped(key *Object, typ reflect.Type) (interface{}, bool) {
-	if v, exists := ctx.cache[key]; exists {
+	cache := ctx.cache
+	if cache == nil {
+		return nil, false
+	}
+	if cache.first.key == key {
+		if cache.first.typ != nil {
+			if cache.first.typ == typ {
+				return cache.first.value, true
+			}
+		} else if reflect.TypeOf(cache.first.value) == typ {
+			return cache.first.value, true
+		}
+	}
+	if v, exists := cache.overflow[key]; exists {
 		if item, ok := v.(objectExportCacheItem); ok {
 			r, exists := item[typ]
 			return r, exists
@@ -1694,35 +1727,91 @@ func (ctx *objectExportCtx) getTyped(key *Object, typ reflect.Type) (interface{}
 	return nil, false
 }
 
-func (ctx *objectExportCtx) put(key *Object, value interface{}) {
-	if ctx.cache == nil {
-		ctx.cache = make(map[*Object]interface{})
+func (cache *objectExportCache) promoteFirst() {
+	if cache.overflow == nil {
+		cache.overflow = make(map[*Object]interface{})
 	}
-	if item, ok := ctx.cache[key].(objectExportCacheItem); ok {
+	first := cache.first
+	if first.typ != nil {
+		cache.overflow[first.key] = objectExportCacheItem{first.typ: first.value}
+	} else {
+		cache.overflow[first.key] = first.value
+	}
+	cache.first = objectExportCacheEntry{}
+}
+
+func (ctx *objectExportCtx) put(key *Object, value interface{}) {
+	cache := ctx.cache
+	if cache == nil {
+		ctx.cache = &objectExportCache{
+			first: objectExportCacheEntry{key: key, value: value},
+		}
+		return
+	}
+	if cache.overflow == nil {
+		if cache.first.key == nil {
+			cache.first = objectExportCacheEntry{key: key, value: value}
+			return
+		}
+		if cache.first.key == key {
+			if cache.first.typ == nil {
+				cache.first.value = value
+				return
+			}
+			if cache.first.typ == key.self.exportType() {
+				cache.first.value = value
+				return
+			}
+		}
+		cache.promoteFirst()
+	}
+	if item, ok := cache.overflow[key].(objectExportCacheItem); ok {
 		item[key.self.exportType()] = value
 	} else {
-		ctx.cache[key] = value
+		cache.overflow[key] = value
 	}
 }
 
 func (ctx *objectExportCtx) putTyped(key *Object, typ reflect.Type, value interface{}) {
-	if ctx.cache == nil {
-		ctx.cache = make(map[*Object]interface{})
+	cache := ctx.cache
+	if cache == nil {
+		ctx.cache = &objectExportCache{
+			first: objectExportCacheEntry{key: key, typ: typ, value: value},
+		}
+		return
 	}
-	v, exists := ctx.cache[key]
+	if cache.overflow == nil {
+		if cache.first.key == nil {
+			cache.first = objectExportCacheEntry{key: key, typ: typ, value: value}
+			return
+		}
+		if cache.first.key == key {
+			if cache.first.typ == typ {
+				cache.first.value = value
+				return
+			}
+			if cache.first.typ == nil && key.self.exportType() == typ {
+				cache.first.typ = typ
+				cache.first.value = value
+				return
+			}
+		}
+		cache.promoteFirst()
+	}
+	v, exists := cache.overflow[key]
 	if exists {
-		if item, ok := ctx.cache[key].(objectExportCacheItem); ok {
+		if item, ok := cache.overflow[key].(objectExportCacheItem); ok {
 			item[typ] = value
 		} else {
 			m := make(objectExportCacheItem, 2)
 			m[key.self.exportType()] = v
 			m[typ] = value
-			ctx.cache[key] = m
+			cache.overflow[key] = m
 		}
 	} else {
 		m := make(objectExportCacheItem)
 		m[typ] = value
-		ctx.cache[key] = m
+		cache.overflow[key] = m
 	}
 }
 
