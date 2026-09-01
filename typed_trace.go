@@ -2,6 +2,16 @@ package goja
 
 import "sync/atomic"
 
+const (
+	// Native compilation costs approximately 7.44us on the reference machine,
+	// while native execution saves approximately 8.59ns per eligible loop
+	// iteration. Requiring 896 remaining iterations puts the current invocation
+	// beyond that measured break-even; 4096 cumulative iterations additionally
+	// require sustained or substantially long-running work before admission.
+	nativeTraceActivationIterations   uint64 = 4096
+	nativeTraceMinRemainingIterations int64  = 896
+)
+
 type typedTraceRegister uint8
 
 const (
@@ -78,20 +88,20 @@ type typedIntLoopTrace struct {
 type typedTraceTierState struct {
 	trace         *typedIntLoopTrace
 	program       *Program
-	disabled      bool
+	activation    uint32
 	guardFailures uint32
 }
 
 type typedTraceEntry struct {
-	state *programTierState
-	trace *typedIntLoopTrace
+	state  *programTierState
+	native *nativeTraceCode
 }
 
 func (e *typedTraceEntry) exec(vm *vm) {
-	e.trace.execute(vm, e.state)
+	e.state.typed.trace.execute(vm, e.state, e)
 }
 
-func (t *typedIntLoopTrace) execute(vm *vm, state *programTierState) {
+func (t *typedIntLoopTrace) execute(vm *vm, state *programTierState, entry *typedTraceEntry) {
 	var registers [typedTraceRegisterCount]int64
 	for _, guard := range t.guards {
 		idx, exists := guard.slot.index(vm)
@@ -106,7 +116,71 @@ func (t *typedIntLoopTrace) execute(vm *vm, state *programTierState) {
 		}
 		registers[guard.register] = int64(value)
 	}
+	if entry.native == nil {
+		entry.native = state.typed.observeNativeEligibility(registers[typedTraceLimit]-registers[typedTraceCounter], compileNativeTrace)
+	}
+	if native := entry.native; native != nil {
+		t.executeNative(vm, state, entry, native, registers)
+		return
+	}
+	t.executeGo(vm, state, registers)
+}
 
+type nativeTraceCompiler func(*typedIntLoopTrace) (*nativeTraceCode, error)
+
+const (
+	nativeTraceEligibleMask  uint32 = 1<<13 - 1
+	nativeTraceAttemptedFlag uint32 = 1 << 13
+	nativeTraceDisabledFlag  uint32 = 1 << 14
+)
+
+func (s *typedTraceTierState) nativeEligibleIterations() uint64 {
+	return uint64(s.activation & nativeTraceEligibleMask)
+}
+
+func (s *typedTraceTierState) nativeAttempted() bool {
+	return s.activation&nativeTraceAttemptedFlag != 0
+}
+
+func (s *typedTraceTierState) disabled() bool {
+	return s.activation&nativeTraceDisabledFlag != 0
+}
+
+func (s *typedTraceTierState) nativeCode() *nativeTraceCode {
+	if s == nil || s.program == nil || s.trace == nil || s.trace.entryPC < 0 || s.trace.entryPC >= len(s.program.code) {
+		return nil
+	}
+	entry, _ := s.program.code[s.trace.entryPC].(*typedTraceEntry)
+	if entry == nil {
+		return nil
+	}
+	return entry.native
+}
+
+func (s *typedTraceTierState) observeNativeEligibility(remaining int64, compile nativeTraceCompiler) *nativeTraceCode {
+	if s == nil || s.disabled() || s.nativeAttempted() || remaining <= 0 {
+		return nil
+	}
+	current := s.nativeEligibleIterations()
+	eligible := uint64(remaining)
+	if eligible >= nativeTraceActivationIterations-current {
+		current = nativeTraceActivationIterations
+	} else {
+		current += eligible
+	}
+	s.activation = s.activation&^nativeTraceEligibleMask | uint32(current)
+	if current < nativeTraceActivationIterations || remaining < nativeTraceMinRemainingIterations {
+		return nil
+	}
+	s.activation |= nativeTraceAttemptedFlag
+	native, err := compile(s.trace)
+	if err == nil {
+		return native
+	}
+	return nil
+}
+
+func (t *typedIntLoopTrace) executeGo(vm *vm, state *programTierState, registers [typedTraceRegisterCount]int64) {
 	for ip := 0; ; ip++ {
 		operation := t.code[ip]
 		switch operation.opcode {
@@ -156,7 +230,7 @@ func (s *programTierState) deoptTypedTrace(vm *vm, deopt typedTraceDeopt, regist
 		s.typed.trace.materialize(vm, registers, deopt.stackMap)
 	}
 	if disable {
-		s.typed.disabled = true
+		s.typed.activation |= nativeTraceDisabledFlag
 		s.typed.guardFailures++
 	}
 	vm.prg = s.quickProgram

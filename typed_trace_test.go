@@ -1,6 +1,7 @@
 package goja
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -98,8 +99,8 @@ func TestTypedTraceLowersAndExecutes(t *testing.T) {
 			t.Fatalf("typed trace result for n=%d seed=%d: got %d, want %d", test.n, test.seed, got, test.want)
 		}
 	}
-	if state.typed.disabled || state.typed.guardFailures != 0 {
-		t.Fatalf("monomorphic trace unexpectedly deoptimised: disabled=%t failures=%d", state.typed.disabled, state.typed.guardFailures)
+	if state.typed.disabled() || state.typed.guardFailures != 0 {
+		t.Fatalf("monomorphic trace unexpectedly deoptimised: disabled=%t failures=%d", state.typed.disabled(), state.typed.guardFailures)
 	}
 }
 
@@ -117,8 +118,8 @@ func TestTypedTraceGuardFailureDisablesWithoutThrash(t *testing.T) {
 	if !result.StrictEquals(valueFloat(10.5)) {
 		t.Fatalf("polymorphic deopt result: got %v, want 10.5", result)
 	}
-	if !state.typed.disabled || state.typed.guardFailures != 1 {
-		t.Fatalf("guard failure state: disabled=%t failures=%d", state.typed.disabled, state.typed.guardFailures)
+	if !state.typed.disabled() || state.typed.guardFailures != 1 {
+		t.Fatalf("guard failure state: disabled=%t failures=%d", state.typed.disabled(), state.typed.guardFailures)
 	}
 	for i := 0; i < 10; i++ {
 		result = callTypedTraceTest(t, call, valueInt(5), valueInt(0))
@@ -131,12 +132,52 @@ func TestTypedTraceGuardFailureDisablesWithoutThrash(t *testing.T) {
 	}
 }
 
+func TestTypedTraceGuardFailureBeforeNativeActivation(t *testing.T) {
+	runtime, call := setupTypedTraceTest(t)
+	result := callTypedTraceTest(t, call, valueInt(64), valueFloat(0.5))
+	if !result.StrictEquals(valueFloat(2016.5)) {
+		t.Fatalf("guard fallback result: got %v, want 2016.5", result)
+	}
+	state := typedTraceState(runtime)
+	if state == nil || !state.typed.disabled() || state.typed.guardFailures != 1 {
+		t.Fatalf("guard failure state: %p", state)
+	}
+	if state.typed.nativeCode() != nil || state.typed.nativeAttempted() || state.typed.nativeEligibleIterations() != 0 {
+		t.Fatalf("guard failure triggered native activation: native=%p attempted=%t eligible=%d", state.typed.nativeCode(), state.typed.nativeAttempted(), state.typed.nativeEligibleIterations())
+	}
+}
+
+func TestNativeTraceCompilerAttemptedAtMostOnce(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "Unavailable"},
+		{name: "Failure", err: errors.New("native compiler test failure")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := &typedTraceTierState{trace: lowerTypedIntLoopTrace(typedTraceInstructionProgram())}
+			attempts := 0
+			compiler := func(*typedIntLoopTrace) (*nativeTraceCode, error) {
+				attempts++
+				return nil, test.err
+			}
+			state.observeNativeEligibility(int64(nativeTraceActivationIterations), compiler)
+			state.observeNativeEligibility(int64(nativeTraceActivationIterations), compiler)
+			if attempts != 1 || !state.nativeAttempted() {
+				t.Fatalf("compiler attempts/state: attempts=%d attempted=%t", attempts, state.nativeAttempted())
+			}
+		})
+	}
+}
+
 func TestTypedTraceRangeDeoptMatchesInterpreter(t *testing.T) {
 	hotRuntime, hotCall := setupTypedTraceTest(t)
 	callTypedTraceTest(t, hotCall, valueInt(128), valueInt(0))
 	hot := callTypedTraceTest(t, hotCall, valueInt(2), valueInt(maxInt))
 	state := typedTraceState(hotRuntime)
-	if state == nil || !state.typed.disabled || state.typed.guardFailures != 1 {
+	if state == nil || !state.typed.disabled() || state.typed.guardFailures != 1 {
 		t.Fatalf("range guard did not disable trace: state=%p", state)
 	}
 
@@ -175,7 +216,7 @@ func TestTypedTraceExceptionDeoptPreservesSource(t *testing.T) {
 				t.Fatalf("unexpected hot error: %v", hotErr)
 			}
 			state := typedTraceState(hotRuntime)
-			if state == nil || !state.typed.disabled || state.typed.guardFailures != 1 {
+			if state == nil || !state.typed.disabled() || state.typed.guardFailures != 1 {
 				t.Fatalf("exception guard did not disable trace: state=%p", state)
 			}
 
@@ -235,6 +276,9 @@ func TestTypedTraceBackedgePolls(t *testing.T) {
 			state := &programTierState{program: program, quickProgram: &quickProgram}
 			traceProgram := quickProgram
 			state.typed = &typedTraceTierState{trace: trace, program: &traceProgram}
+			entry := &typedTraceEntry{state: state}
+			traceProgram.code = append([]instruction(nil), traceProgram.code...)
+			traceProgram.code[trace.entryPC] = entry
 			runtime := New()
 			vm := runtime.vm
 			vm.prg = state.typed.program
@@ -250,15 +294,15 @@ func TestTypedTraceBackedgePolls(t *testing.T) {
 			test.activate(vm)
 			defer test.deactivate(vm)
 
-			trace.execute(vm, state)
+			trace.execute(vm, state, entry)
 			if vm.prg != state.quickProgram || vm.pc != trace.entryPC {
 				t.Fatalf("poll did not deopt to loop header: program=%p pc=%d", vm.prg, vm.pc)
 			}
 			if vm.stack[2] != valueInt(1) || vm.stack[3] != valueInt(0) {
 				t.Fatalf("registers were not materialised at backedge: counter=%v accumulator=%v", vm.stack[2], vm.stack[3])
 			}
-			if state.typed.disabled || state.typed.guardFailures != 0 {
-				t.Fatalf("temporary poll disabled trace: disabled=%t failures=%d", state.typed.disabled, state.typed.guardFailures)
+			if state.typed.disabled() || state.typed.guardFailures != 0 {
+				t.Fatalf("temporary poll disabled trace: disabled=%t failures=%d", state.typed.disabled(), state.typed.guardFailures)
 			}
 		})
 	}
@@ -302,7 +346,7 @@ func TestTypedTraceProfilerUsesOriginalProgram(t *testing.T) {
 	if result.ToInteger() != 8128 {
 		t.Fatalf("profiled result: got %v, want 8128", result)
 	}
-	if state.typed.disabled || state.typed.guardFailures != 0 {
+	if state.typed.disabled() || state.typed.guardFailures != 0 {
 		t.Fatal("profiling permanently disabled typed trace")
 	}
 }

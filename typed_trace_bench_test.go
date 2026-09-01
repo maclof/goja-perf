@@ -76,9 +76,11 @@ func BenchmarkTypedTraceSteadyState(b *testing.B) {
 		b.Fatal(err)
 	}
 	checkTypedTraceBenchmarkResult(b, result, valueInt(499500))
-	if state := typedTraceState(runtime); state == nil {
+	state := typedTraceState(runtime)
+	if state == nil {
 		b.Fatal("warm-up did not produce typed IR")
 	}
+	warmNativeTraceBenchmark(b, call, state)
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -109,7 +111,7 @@ func BenchmarkTypedTraceGuardFailure(b *testing.B) {
 		}
 		checkTypedTraceBenchmarkResult(b, result, valueFloat(499500.5))
 		state := typedTraceState(runtime)
-		if state == nil || !state.typed.disabled || state.typed.guardFailures != 1 {
+		if state == nil || !state.typed.disabled() || state.typed.guardFailures != 1 {
 			b.Fatal("polymorphic call did not deoptimise exactly once")
 		}
 		b.StartTimer()
@@ -129,7 +131,7 @@ func BenchmarkTypedTraceDeoptimizedSteadyState(b *testing.B) {
 	}
 	checkTypedTraceBenchmarkResult(b, result, valueFloat(499500.5))
 	state := typedTraceState(runtime)
-	if state == nil || !state.typed.disabled || state.typed.guardFailures != 1 {
+	if state == nil || !state.typed.disabled() || state.typed.guardFailures != 1 {
 		b.Fatal("warm-up did not leave one disabled trace")
 	}
 

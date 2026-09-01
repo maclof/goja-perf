@@ -95,13 +95,13 @@ func (s *programTierState) quicken(hotBackedgePC int) {
 	if trace := lowerTypedIntLoopTraceAt(s.program, hotBackedgePC); trace != nil {
 		traceProgram := quickProgram
 		traceProgram.code = append([]instruction(nil), quickProgram.code...)
-		traceProgram.code[trace.entryPC] = &typedTraceEntry{state: s, trace: trace}
+		traceProgram.code[trace.entryPC] = &typedTraceEntry{state: s}
 		s.typed = &typedTraceTierState{trace: trace, program: &traceProgram}
 	}
 }
 
 func (s *programTierState) executableProgram() *Program {
-	if s.typed != nil && !s.typed.disabled {
+	if s.typed != nil && !s.typed.disabled() {
 		return s.typed.program
 	}
 	return s.quickProgram

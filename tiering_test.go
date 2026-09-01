@@ -296,7 +296,10 @@ func TestRuntimeTieringCacheIsBounded(t *testing.T) {
 }
 
 func TestRuntimeTieringBoundWithLiveFunctions(t *testing.T) {
-	const functionCount = maxTieringPrograms + 16
+	const (
+		functionCount = maxTieringPrograms + 16
+		iterations    = int(nativeTraceActivationIterations) + 32
+	)
 	var source strings.Builder
 	source.WriteString("var tierLiveFunctions = [\n")
 	for i := 0; i < functionCount; i++ {
@@ -304,7 +307,7 @@ func TestRuntimeTieringBoundWithLiveFunctions(t *testing.T) {
 	}
 	source.WriteString("];\n")
 	for i := 0; i < functionCount; i++ {
-		fmt.Fprintf(&source, "tierLiveFunctions[%d](40); tierLiveFunctions[%d](40);\n", i, i)
+		fmt.Fprintf(&source, "tierLiveFunctions[%d](%d); tierLiveFunctions[%d](%d);\n", i, iterations, i, iterations)
 	}
 
 	runtime := New()
@@ -320,6 +323,7 @@ func TestRuntimeTieringBoundWithLiveFunctions(t *testing.T) {
 	if got := typedTraceCount(runtime); got != maxTieringPrograms {
 		t.Fatalf("retained typed trace count: got %d, want %d", got, maxTieringPrograms)
 	}
+	assertNativeTraceBound(t, runtime)
 
 	functions := runtime.Get("tierLiveFunctions").ToObject(runtime)
 	first := functions.Get("0").(*Object).self.(*funcObject).prg
@@ -335,12 +339,13 @@ func TestRuntimeTieringBoundWithLiveFunctions(t *testing.T) {
 	if !ok {
 		t.Fatal("first retained value is not callable")
 	}
-	result, err := call(_undefined, valueInt(40))
+	result, err := call(_undefined, valueInt(iterations))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := result.ToInteger(); got != 780 {
-		t.Fatalf("unexpected result after reaching admission limit: got %d, want 780", got)
+	want := int64(iterations * (iterations - 1) / 2)
+	if got := result.ToInteger(); got != want {
+		t.Fatalf("unexpected result after reaching admission limit: got %d, want %d", got, want)
 	}
 	if state := runtime.vm.tiering.lookup(first); state != firstState {
 		t.Fatalf("admitted state was duplicated: got %p, want %p", state, firstState)
