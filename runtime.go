@@ -178,13 +178,14 @@ type RandSource func() float64
 type Now func() time.Time
 
 type Runtime struct {
-	global          global
-	globalObject    *Object
-	stringSingleton *stringObject
-	rand            RandSource
-	now             Now
-	_collator       *collate.Collator
-	parserOptions   []parser.Option
+	global                       global
+	globalObject                 *Object
+	disableDynamicCodeGeneration bool
+	stringSingleton              *stringObject
+	rand                         RandSource
+	now                          Now
+	_collator                    *collate.Collator
+	parserOptions                []parser.Option
 
 	symbolRegistry map[unistring.String]*Symbol
 
@@ -963,6 +964,10 @@ func (r *Runtime) builtin_thrower(call FunctionCall) Value {
 }
 
 func (r *Runtime) eval(srcVal String, direct, strict bool) Value {
+	if r.disableDynamicCodeGeneration {
+		panic(r.NewTypeError("dynamic code generation is disabled by sandbox policy"))
+	}
+
 	src := escapeInvalidUtf16(srcVal)
 	vm := r.vm
 	inGlobal := true
