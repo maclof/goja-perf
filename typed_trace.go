@@ -80,7 +80,27 @@ const (
 	typedTraceExitUnlessGreater
 	typedTraceGuardDecrementRange
 	typedTraceDecrement
+	typedTraceExitUnlessLessOrEqual
 )
+
+type typedTraceLoopDirection uint8
+
+const (
+	typedTraceLoopAscending typedTraceLoopDirection = iota
+	typedTraceLoopDescending
+)
+
+type typedTraceLoopComparison uint8
+
+const (
+	typedTraceLoopExclusive typedTraceLoopComparison = iota
+	typedTraceLoopInclusive
+)
+
+type typedTraceLoopShape struct {
+	direction  typedTraceLoopDirection
+	comparison typedTraceLoopComparison
+}
 
 type typedTraceIR struct {
 	opcode typedTraceOpcode
@@ -167,6 +187,10 @@ func (t *typedIntLoopTrace) remainingIterations(registers [typedTraceRegisterCou
 		if counter < limit {
 			return limit - counter
 		}
+	case typedTraceExitUnlessLessOrEqual:
+		if counter <= limit {
+			return limit - counter + 1
+		}
 	case typedTraceExitUnlessGreater:
 		if counter > limit {
 			return counter - limit
@@ -245,6 +269,12 @@ func (t *typedIntLoopTrace) executeGo(vm *vm, state *programTierState, registers
 			}
 		case typedTraceExitUnlessGreater:
 			if registers[operation.left] <= registers[operation.right] {
+				t.materialize(vm, registers, t.deopts[operation.deopt].stackMap)
+				vm.pc = operation.exitPC
+				return
+			}
+		case typedTraceExitUnlessLessOrEqual:
+			if registers[operation.left] > registers[operation.right] {
 				t.materialize(vm, registers, t.deopts[operation.deopt].stackMap)
 				vm.pc = operation.exitPC
 				return
@@ -385,6 +415,7 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 		counter, counterOK := program.code[entryPC].(loadStack)
 		limit, limitOK := program.code[entryPC+1].(loadStackLex)
 		_, lessOK := program.code[entryPC+2].(_op_lt)
+		_, lessEqualOK := program.code[entryPC+2].(_op_lte)
 		_, greaterOK := program.code[entryPC+2].(_op_gt)
 		exit, exitOK := program.code[entryPC+3].(jneP)
 		accumulator, accumulatorOK := program.code[entryPC+4].(loadStack)
@@ -396,7 +427,7 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 		_, decrementOK := program.code[entryPC+9].(_dec)
 		counterStore, counterStoreOK := program.code[entryPC+10].(storeStackP)
 		backedge, backedgeOK := program.code[entryPC+11].(jump)
-		ascending := lessOK && incrementOK
+		ascending := (lessOK || lessEqualOK) && incrementOK
 		descending := greaterOK && decrementOK
 		if !counterOK || !limitOK || (!ascending && !descending) || !exitOK || !accumulatorOK || !bodyCounterOK || !addOK ||
 			!accumulatorStoreOK || !updateCounterOK || !counterStoreOK || !backedgeOK {
@@ -424,7 +455,9 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 		exitOpcode := typedTraceExitUnlessLess
 		inductionGuardOpcode := typedTraceGuardIncrementRange
 		inductionOpcode := typedTraceIncrement
-		if descending {
+		if lessEqualOK {
+			exitOpcode = typedTraceExitUnlessLessOrEqual
+		} else if descending {
 			exitOpcode = typedTraceExitUnlessGreater
 			inductionGuardOpcode = typedTraceGuardDecrementRange
 			inductionOpcode = typedTraceDecrement

@@ -61,14 +61,14 @@ func copyNativeTraceBytes(dst uintptr, src *byte, size uintptr)
 func readNativeTraceBytes(dst *byte, src uintptr, size uintptr)
 
 func compileNativeTrace(trace *typedIntLoopTrace) (*nativeTraceCode, error) {
-	descending, supported := nativeTraceIRDirection(trace)
+	shape, supported := nativeTraceIRLoopShape(trace)
 	if !supported {
 		return nil, nil
 	}
 	if err := checkNativeTraceFrameLayout(); err != nil {
 		return nil, err
 	}
-	code, err := emitNativeTraceAMD64(descending)
+	code, err := emitNativeTraceAMD64(shape)
 	if err != nil {
 		return nil, err
 	}
@@ -80,27 +80,27 @@ func compileNativeTrace(trace *typedIntLoopTrace) (*nativeTraceCode, error) {
 }
 
 func nativeTraceIRSupported(trace *typedIntLoopTrace) bool {
-	_, supported := nativeTraceIRDirection(trace)
+	_, supported := nativeTraceIRLoopShape(trace)
 	return supported
 }
 
-func nativeTraceIRDirection(trace *typedIntLoopTrace) (descending, supported bool) {
+func nativeTraceIRLoopShape(trace *typedIntLoopTrace) (shape typedTraceLoopShape, supported bool) {
 	if trace == nil || len(trace.guards) != 3 || len(trace.deopts) != 1 || len(trace.code) != 7 {
-		return false, false
+		return shape, false
 	}
 	var guarded, mapped [typedTraceRegisterCount]bool
 	for _, guard := range trace.guards {
 		if guard.register >= typedTraceRegisterCount || guard.kind != typedTraceValueInt || guard.deopt != 0 || guarded[guard.register] {
-			return false, false
+			return shape, false
 		}
 		guarded[guard.register] = true
 	}
 	if len(trace.deopts[0].stackMap) != int(typedTraceRegisterCount) {
-		return false, false
+		return shape, false
 	}
 	for _, entry := range trace.deopts[0].stackMap {
 		if entry.register >= typedTraceRegisterCount || mapped[entry.register] {
-			return false, false
+			return shape, false
 		}
 		mapped[entry.register] = true
 	}
@@ -111,19 +111,24 @@ func nativeTraceIRDirection(trace *typedIntLoopTrace) (descending, supported boo
 		code[5].opcode == typedTracePollBackedge && code[5].deopt == 0 &&
 		code[6].opcode == typedTraceJump && code[6].target == 0
 	if !common {
-		return false, false
+		return shape, false
 	}
 	if code[0].opcode == typedTraceExitUnlessLess &&
 		code[2].opcode == typedTraceGuardIncrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
 		code[4].opcode == typedTraceIncrement && code[4].dst == typedTraceCounter {
-		return false, true
+		return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive}, true
+	}
+	if code[0].opcode == typedTraceExitUnlessLessOrEqual &&
+		code[2].opcode == typedTraceGuardIncrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
+		code[4].opcode == typedTraceIncrement && code[4].dst == typedTraceCounter {
+		return typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive}, true
 	}
 	if code[0].opcode == typedTraceExitUnlessGreater &&
 		code[2].opcode == typedTraceGuardDecrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
 		code[4].opcode == typedTraceDecrement && code[4].dst == typedTraceCounter {
-		return true, true
+		return typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive}, true
 	}
-	return false, false
+	return shape, false
 }
 
 func checkNativeTraceFrameLayout() error {
@@ -254,7 +259,7 @@ func (e *nativeTraceEmitter) finish() ([]byte, error) {
 	return e.code, nil
 }
 
-func emitNativeTraceAMD64(descending bool) ([]byte, error) {
+func emitNativeTraceAMD64(shape typedTraceLoopShape) ([]byte, error) {
 	e := newNativeTraceEmitter()
 	// R10 is the frame pointer. RAX=counter, RDX=accumulator, R8=budget,
 	// R11=maxInt, RCX=-maxInt, and R9 is the sole scratch register. These
@@ -267,10 +272,15 @@ func emitNativeTraceAMD64(descending bool) ([]byte, error) {
 
 	e.label(nativeTraceLoop)
 	e.emit(0x49, 0x3b, 0x42, 0x08) // CMP RAX, [R10+limit]
-	if descending {
+	switch shape {
+	case typedTraceLoopShape{direction: typedTraceLoopDescending, comparison: typedTraceLoopExclusive}:
 		e.jump([]byte{0x0f, 0x8e}, nativeTraceNormal) // JLE
-	} else {
+	case typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopInclusive}:
+		e.jump([]byte{0x0f, 0x8f}, nativeTraceNormal) // JG
+	case typedTraceLoopShape{direction: typedTraceLoopAscending, comparison: typedTraceLoopExclusive}:
 		e.jump([]byte{0x0f, 0x8d}, nativeTraceNormal) // JGE
+	default:
+		return nil, errors.New("unsupported native trace loop shape")
 	}
 	e.emit(0x49, 0x89, 0xd1) // MOV R9, RDX
 	e.emit(0x49, 0x01, 0xc1) // ADD R9, RAX
@@ -278,7 +288,7 @@ func emitNativeTraceAMD64(descending bool) ([]byte, error) {
 	e.jump([]byte{0x0f, 0x8f}, nativeTraceGuard)
 	e.emit(0x49, 0x39, 0xc9) // CMP R9, RCX
 	e.jump([]byte{0x0f, 0x8c}, nativeTraceGuard)
-	if descending {
+	if shape.direction == typedTraceLoopDescending {
 		e.emit(0x48, 0x39, 0xc8) // CMP RAX, RCX
 		e.jump([]byte{0x0f, 0x8e}, nativeTraceGuard)
 	} else {
@@ -286,7 +296,7 @@ func emitNativeTraceAMD64(descending bool) ([]byte, error) {
 		e.jump([]byte{0x0f, 0x8d}, nativeTraceGuard)
 	}
 	e.emit(0x4c, 0x89, 0xca) // MOV RDX, R9
-	if descending {
+	if shape.direction == typedTraceLoopDescending {
 		e.emit(0x48, 0xff, 0xc8) // DEC RAX
 	} else {
 		e.emit(0x48, 0xff, 0xc0) // INC RAX
