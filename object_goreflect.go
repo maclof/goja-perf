@@ -219,6 +219,41 @@ func (o *objectGoReflect) _getMethod(jsName string) reflect.Value {
 	return reflect.Value{}
 }
 
+// newMethodValue reuses the expensive bound reflect method and initialized
+// wrapper as a private template, but returns a fresh Function object for every
+// property read so observable identity and mutable Function properties remain
+// unchanged. Reflected methods take precedence over base properties and cannot
+// be overwritten through the host object, making the base values map safe
+// private storage for method names.
+func (o *objectGoReflect) newMethodValue(name string) Value {
+	key := unistring.NewFromString(name)
+	if cached, ok := o.values[key].(*Object); ok {
+		switch cached.self.(type) {
+		case *wrappedFuncObject, *nativeFuncObject:
+			return o.val.runtime.cloneNativeFunc(cached)
+		}
+	}
+	method := o._getMethod(name)
+	if !method.IsValid() {
+		return nil
+	}
+	wrapped := o.val.runtime.toValue(method.Interface(), method)
+	obj := wrapped.(*Object)
+	switch f := obj.self.(type) {
+	case *wrappedFuncObject:
+		o.values[key] = wrapped
+		return o.val.runtime.cloneNativeFunc(obj)
+	case *nativeFuncObject:
+		// Native constructors close over their original Function object and own
+		// a per-function prototype, so they cannot be cloned from a template.
+		if f.construct == nil {
+			o.values[key] = wrapped
+			return o.val.runtime.cloneNativeFunc(obj)
+		}
+	}
+	return wrapped
+}
+
 func (o *objectGoReflect) elemToValue(ev reflect.Value) (Value, reflectValueWrapper) {
 	if isContainer(ev.Kind()) {
 		if ev.CanAddr() {
@@ -268,8 +303,8 @@ func (o *objectGoReflect) _get(name string) Value {
 		}
 	}
 
-	if v := o._getMethod(name); v.IsValid() {
-		return o.val.runtime.toValue(v.Interface(), v)
+	if v := o.newMethodValue(name); v != nil {
+		return v
 	}
 
 	return nil
@@ -287,9 +322,9 @@ func (o *objectGoReflect) getOwnPropStr(name unistring.String) Value {
 		}
 	}
 
-	if v := o._getMethod(n); v.IsValid() {
+	if v := o.newMethodValue(n); v != nil {
 		return &valueProperty{
-			value:      o.val.runtime.toValue(v.Interface(), v),
+			value:      v,
 			enumerable: true,
 		}
 	}
@@ -524,6 +559,12 @@ func (o *objectGoReflect) reflectValue() reflect.Value {
 }
 
 func (o *objectGoReflect) setReflectValue(v reflect.Value) {
+	// Bound method values capture the old address. Container operations can
+	// retarget a cached reflected wrapper, so direct-call wrappers must be
+	// recreated against the new address.
+	for _, name := range o.methodsInfo.Names {
+		delete(o.values, unistring.NewFromString(name))
+	}
 	o.fieldsValue = v
 	o.origValue = v
 	o.methodsValue = v.Addr()

@@ -779,6 +779,43 @@ func (r *Runtime) newWrappedFunc(value reflect.Value) *Object {
 	return v
 }
 
+func (r *Runtime) cloneNativeFunc(template *Object) *Object {
+	v := &Object{runtime: r}
+	var base, sourceBase *baseObject
+	var function, sourceFunction *baseFuncObject
+	switch source := template.self.(type) {
+	case *wrappedFuncObject:
+		clone := *source
+		function = &clone.baseFuncObject
+		sourceFunction = &source.baseFuncObject
+		base = &clone.baseObject
+		sourceBase = &source.baseObject
+		v.self = &clone
+	case *nativeFuncObject:
+		clone := *source
+		function = &clone.baseFuncObject
+		sourceFunction = &source.baseFuncObject
+		base = &clone.baseObject
+		sourceBase = &source.baseObject
+		v.self = &clone
+	default:
+		panic(r.NewTypeError("Method is not a native function"))
+	}
+	base.val = v
+	base.values = make(map[unistring.String]Value, len(sourceBase.values))
+	for name, value := range sourceBase.values {
+		if value == &sourceFunction.lenProp {
+			value = &function.lenProp
+		} else if property, ok := value.(*valueProperty); ok {
+			clone := *property
+			value = &clone
+		}
+		base.values[name] = value
+	}
+	base.propNames = append([]unistring.String(nil), sourceBase.propNames...)
+	return v
+}
+
 func (r *Runtime) newNativeFuncConstructObj(v *Object, construct func(args []Value, proto *Object) *Object, name unistring.String, proto *Object, length int) *nativeFuncObject {
 	f := &nativeFuncObject{
 		baseFuncObject: baseFuncObject{
