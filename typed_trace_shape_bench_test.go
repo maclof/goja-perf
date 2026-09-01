@@ -126,3 +126,50 @@ func BenchmarkTypedTraceDescendingSteadyState(b *testing.B) {
 		checkTypedTraceShapeBenchmarkResult(b, result, 500500)
 	}
 }
+
+func BenchmarkTypedTraceInclusiveSetup(b *testing.B) {
+	program := MustCompile("typed_trace_shape_benchmark.js", typedTraceShapeBenchmarkSource, false)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		runtime := New()
+		if _, err := runtime.RunProgram(program); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkTypedTraceInclusiveTierUp(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		_, call := setupTypedTraceShapeBenchmark(b, "typedTraceInclusive")
+		b.StartTimer()
+		result, err := call(_undefined, valueInt(63), valueInt(0))
+		b.StopTimer()
+		if err != nil {
+			b.Fatal(err)
+		}
+		checkTypedTraceShapeBenchmarkResult(b, result, 2016)
+		b.StartTimer()
+	}
+}
+
+func BenchmarkTypedTraceInclusiveSteadyState(b *testing.B) {
+	_, call := setupTypedTraceShapeBenchmark(b, "typedTraceInclusive")
+	for i := 0; i < 6; i++ {
+		result, err := call(_undefined, valueInt(999), valueInt(0))
+		if err != nil {
+			b.Fatal(err)
+		}
+		checkTypedTraceShapeBenchmarkResult(b, result, 499500)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		result, err := call(_undefined, valueInt(999), valueInt(0))
+		if err != nil {
+			b.Fatal(err)
+		}
+		checkTypedTraceShapeBenchmarkResult(b, result, 499500)
+	}
+}
