@@ -152,3 +152,50 @@ func BenchmarkBoundaryToValueSetup(b *testing.B) {
 		})
 	}
 }
+
+func BenchmarkBoundaryExportToByShape(b *testing.B) {
+	runtime := New()
+	sliceValue, err := runtime.RunString(`[19, 23]`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	mapValue, err := runtime.RunString(`({answer: 42})`)
+	if err != nil {
+		b.Fatal(err)
+	}
+	structValue, err := runtime.RunString(`({Count: 42, Label: "x"})`)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("Slice", func(b *testing.B) {
+		b.ReportAllocs()
+		var result []int
+		for i := 0; i < b.N; i++ {
+			result = nil
+			if err := runtime.ExportTo(sliceValue, &result); err != nil || len(result) != 2 || result[0]+result[1] != 42 {
+				b.Fatalf("result=%v err=%v", result, err)
+			}
+		}
+	})
+	b.Run("Map", func(b *testing.B) {
+		b.ReportAllocs()
+		var result map[string]int
+		for i := 0; i < b.N; i++ {
+			result = nil
+			if err := runtime.ExportTo(mapValue, &result); err != nil || result["answer"] != 42 {
+				b.Fatalf("result=%v err=%v", result, err)
+			}
+		}
+	})
+	b.Run("Struct", func(b *testing.B) {
+		b.ReportAllocs()
+		var result boundaryBenchRecord
+		for i := 0; i < b.N; i++ {
+			result = boundaryBenchRecord{}
+			if err := runtime.ExportTo(structValue, &result); err != nil || result.Count != 42 || result.Label != "x" {
+				b.Fatalf("result=%+v err=%v", result, err)
+			}
+		}
+	})
+}
