@@ -61,13 +61,14 @@ func copyNativeTraceBytes(dst uintptr, src *byte, size uintptr)
 func readNativeTraceBytes(dst *byte, src uintptr, size uintptr)
 
 func compileNativeTrace(trace *typedIntLoopTrace) (*nativeTraceCode, error) {
-	if !nativeTraceIRSupported(trace) {
+	descending, supported := nativeTraceIRDirection(trace)
+	if !supported {
 		return nil, nil
 	}
 	if err := checkNativeTraceFrameLayout(); err != nil {
 		return nil, err
 	}
-	code, err := emitNativeTraceAMD64()
+	code, err := emitNativeTraceAMD64(descending)
 	if err != nil {
 		return nil, err
 	}
@@ -79,33 +80,50 @@ func compileNativeTrace(trace *typedIntLoopTrace) (*nativeTraceCode, error) {
 }
 
 func nativeTraceIRSupported(trace *typedIntLoopTrace) bool {
+	_, supported := nativeTraceIRDirection(trace)
+	return supported
+}
+
+func nativeTraceIRDirection(trace *typedIntLoopTrace) (descending, supported bool) {
 	if trace == nil || len(trace.guards) != 3 || len(trace.deopts) != 1 || len(trace.code) != 7 {
-		return false
+		return false, false
 	}
 	var guarded, mapped [typedTraceRegisterCount]bool
 	for _, guard := range trace.guards {
 		if guard.register >= typedTraceRegisterCount || guard.kind != typedTraceValueInt || guard.deopt != 0 || guarded[guard.register] {
-			return false
+			return false, false
 		}
 		guarded[guard.register] = true
 	}
 	if len(trace.deopts[0].stackMap) != int(typedTraceRegisterCount) {
-		return false
+		return false, false
 	}
 	for _, entry := range trace.deopts[0].stackMap {
 		if entry.register >= typedTraceRegisterCount || mapped[entry.register] {
-			return false
+			return false, false
 		}
 		mapped[entry.register] = true
 	}
 	code := trace.code
-	return code[0].opcode == typedTraceExitUnlessLess && code[0].left == typedTraceCounter && code[0].right == typedTraceLimit && code[0].deopt == 0 &&
+	common := code[0].left == typedTraceCounter && code[0].right == typedTraceLimit && code[0].deopt == 0 &&
 		code[1].opcode == typedTraceGuardAddRange && code[1].left == typedTraceAccumulator && code[1].right == typedTraceCounter && code[1].deopt == 0 &&
-		code[2].opcode == typedTraceGuardIncrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
 		code[3].opcode == typedTraceAdd && code[3].dst == typedTraceAccumulator && code[3].left == typedTraceAccumulator && code[3].right == typedTraceCounter &&
-		code[4].opcode == typedTraceIncrement && code[4].dst == typedTraceCounter &&
 		code[5].opcode == typedTracePollBackedge && code[5].deopt == 0 &&
 		code[6].opcode == typedTraceJump && code[6].target == 0
+	if !common {
+		return false, false
+	}
+	if code[0].opcode == typedTraceExitUnlessLess &&
+		code[2].opcode == typedTraceGuardIncrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
+		code[4].opcode == typedTraceIncrement && code[4].dst == typedTraceCounter {
+		return false, true
+	}
+	if code[0].opcode == typedTraceExitUnlessGreater &&
+		code[2].opcode == typedTraceGuardDecrementRange && code[2].left == typedTraceCounter && code[2].deopt == 0 &&
+		code[4].opcode == typedTraceDecrement && code[4].dst == typedTraceCounter {
+		return true, true
+	}
+	return false, false
 }
 
 func checkNativeTraceFrameLayout() error {
@@ -236,7 +254,7 @@ func (e *nativeTraceEmitter) finish() ([]byte, error) {
 	return e.code, nil
 }
 
-func emitNativeTraceAMD64() ([]byte, error) {
+func emitNativeTraceAMD64(descending bool) ([]byte, error) {
 	e := newNativeTraceEmitter()
 	// R10 is the frame pointer. RAX=counter, RDX=accumulator, R8=budget,
 	// R11=maxInt, RCX=-maxInt, and R9 is the sole scratch register. These
@@ -249,17 +267,30 @@ func emitNativeTraceAMD64() ([]byte, error) {
 
 	e.label(nativeTraceLoop)
 	e.emit(0x49, 0x3b, 0x42, 0x08) // CMP RAX, [R10+limit]
-	e.jump([]byte{0x0f, 0x8d}, nativeTraceNormal)
+	if descending {
+		e.jump([]byte{0x0f, 0x8e}, nativeTraceNormal) // JLE
+	} else {
+		e.jump([]byte{0x0f, 0x8d}, nativeTraceNormal) // JGE
+	}
 	e.emit(0x49, 0x89, 0xd1) // MOV R9, RDX
 	e.emit(0x49, 0x01, 0xc1) // ADD R9, RAX
 	e.emit(0x4d, 0x39, 0xd9) // CMP R9, R11
 	e.jump([]byte{0x0f, 0x8f}, nativeTraceGuard)
 	e.emit(0x49, 0x39, 0xc9) // CMP R9, RCX
 	e.jump([]byte{0x0f, 0x8c}, nativeTraceGuard)
-	e.emit(0x4c, 0x39, 0xd8) // CMP RAX, R11
-	e.jump([]byte{0x0f, 0x8d}, nativeTraceGuard)
-	e.emit(0x4c, 0x89, 0xca)       // MOV RDX, R9
-	e.emit(0x48, 0xff, 0xc0)       // INC RAX
+	if descending {
+		e.emit(0x48, 0x39, 0xc8) // CMP RAX, RCX
+		e.jump([]byte{0x0f, 0x8e}, nativeTraceGuard)
+	} else {
+		e.emit(0x4c, 0x39, 0xd8) // CMP RAX, R11
+		e.jump([]byte{0x0f, 0x8d}, nativeTraceGuard)
+	}
+	e.emit(0x4c, 0x89, 0xca) // MOV RDX, R9
+	if descending {
+		e.emit(0x48, 0xff, 0xc8) // DEC RAX
+	} else {
+		e.emit(0x48, 0xff, 0xc0) // INC RAX
+	}
 	e.emit(0x4d, 0x8b, 0x4a, 0x20) // MOV R9, [R10+interrupt]
 	e.emit(0x41, 0x83, 0x39, 0x00) // CMP DWORD PTR [R9], 0
 	e.jump([]byte{0x0f, 0x85}, nativeTraceInterrupt)

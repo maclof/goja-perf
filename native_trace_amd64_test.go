@@ -18,6 +18,11 @@ func compileTestNativeTrace(t *testing.T) (*typedIntLoopTrace, *nativeTraceCode)
 	if trace == nil {
 		t.Fatal("test loop did not lower to typed IR")
 	}
+	return trace, compileNativeTraceForTest(t, trace)
+}
+
+func compileNativeTraceForTest(t *testing.T, trace *typedIntLoopTrace) *nativeTraceCode {
+	t.Helper()
 	native, err := compileNativeTrace(trace)
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +35,7 @@ func compileTestNativeTrace(t *testing.T) (*typedIntLoopTrace, *nativeTraceCode)
 			t.Error(err)
 		}
 	})
-	return trace, native
+	return native
 }
 
 func TestNativeTraceRejectsTypedFloatIR(t *testing.T) {
@@ -83,6 +88,24 @@ func TestNativeTraceLazyActivation(t *testing.T) {
 	}
 	if state.typed.nativeAttempted() || state.typed.nativeEligibleIterations() != 33 {
 		t.Fatalf("lazy activation state: attempted=%t eligible=%d, want false/33", state.typed.nativeAttempted(), state.typed.nativeEligibleIterations())
+	}
+}
+
+func TestNativeDescendingTraceLazyActivation(t *testing.T) {
+	runtime, call := setupTypedDescendingTraceTest(t)
+	result := callTypedDescendingTraceTest(t, call, valueInt(64), valueInt(0), valueInt(0))
+	if result.ToInteger() != 2080 {
+		t.Fatalf("tier-up result: got %v, want 2080", result)
+	}
+	state := typedTraceState(runtime)
+	if state == nil {
+		t.Fatal("tier-up did not produce descending typed IR")
+	}
+	if state.typed.nativeCode() != nil {
+		t.Fatal("one-off descending 64-iteration tier-up allocated native code")
+	}
+	if state.typed.nativeAttempted() || state.typed.nativeEligibleIterations() != 33 {
+		t.Fatalf("lazy descending activation: attempted=%t eligible=%d, want false/33", state.typed.nativeAttempted(), state.typed.nativeEligibleIterations())
 	}
 }
 
@@ -189,7 +212,7 @@ func TestNativeTracePrivateABIAndWX(t *testing.T) {
 	if protection != pageExecuteRead || protection == pageReadWrite || protection == pageExecuteReadWrite {
 		t.Fatalf("native memory protection: got %#x, want PAGE_EXECUTE_READ (%#x)", protection, pageExecuteRead)
 	}
-	want, err := emitNativeTraceAMD64()
+	want, err := emitNativeTraceAMD64(false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,15 +223,108 @@ func TestNativeTracePrivateABIAndWX(t *testing.T) {
 }
 
 func TestNativeTraceRejectsUnsupportedIR(t *testing.T) {
-	trace := lowerTypedIntLoopTrace(typedTraceInstructionProgram())
-	trace.code = append([]typedTraceIR(nil), trace.code...)
-	trace.code[3].opcode = typedTracePollBackedge
-	native, err := compileNativeTrace(trace)
+	for _, test := range []struct {
+		name   string
+		trace  *typedIntLoopTrace
+		mutate func([]typedTraceIR)
+	}{
+		{
+			name:   "UnsupportedBody",
+			trace:  lowerTypedIntLoopTrace(typedTraceInstructionProgram()),
+			mutate: func(code []typedTraceIR) { code[3].opcode = typedTracePollBackedge },
+		},
+		{
+			name:   "MismatchedDescendingUpdate",
+			trace:  lowerTypedIntLoopTrace(typedDescendingTraceInstructionProgram()),
+			mutate: func(code []typedTraceIR) { code[4].opcode = typedTraceIncrement },
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.trace.code = append([]typedTraceIR(nil), test.trace.code...)
+			test.mutate(test.trace.code)
+			native, err := compileNativeTrace(test.trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if native != nil {
+				t.Fatal("unsupported IR unexpectedly compiled to native code")
+			}
+		})
+	}
+}
+
+func TestNativeDescendingTraceExitReasons(t *testing.T) {
+	trace := lowerTypedIntLoopTrace(typedDescendingTraceInstructionProgram())
+	if trace == nil {
+		t.Fatal("descending loop did not lower to typed IR")
+	}
+	native := compileNativeTraceForTest(t, trace)
+	wantCode, err := emitNativeTraceAMD64(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if native != nil {
-		t.Fatal("unsupported IR unexpectedly compiled to native code")
+	if got := native.memory.bytes(); !bytes.Equal(got, wantCode) {
+		t.Fatalf("descending RX memory differs from emitted code: got %x, want %x", got, wantCode)
+	}
+	t.Logf("descending native trace machine code (%d bytes): %x", len(wantCode), wantCode)
+	ascendingCode, err := emitNativeTraceAMD64(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(wantCode, ascendingCode) {
+		t.Fatal("descending emitter produced ascending machine code")
+	}
+
+	var interrupt uint32
+	var profiler int32
+	for _, test := range []struct {
+		name            string
+		frame           nativeTraceFrame
+		interrupt       uint32
+		profiler        int32
+		wantExit        nativeTraceExit
+		wantCounter     int64
+		wantAccumulator int64
+		wantBudget      uint64
+	}{
+		{
+			name: "Normal", frame: nativeTraceFrame{counter: 3, limit: 0, accumulator: 0, budget: 8},
+			wantExit: nativeTraceExitNormal, wantCounter: 0, wantAccumulator: 6, wantBudget: 5,
+		},
+		{
+			name: "AddUpperGuard", frame: nativeTraceFrame{counter: 1, limit: 0, accumulator: maxInt, budget: 8},
+			wantExit: nativeTraceExitGuard, wantCounter: 1, wantAccumulator: maxInt, wantBudget: 8,
+		},
+		{
+			name: "DecrementGuard", frame: nativeTraceFrame{counter: -maxInt, limit: -maxInt - 1, accumulator: 0, budget: 8},
+			wantExit: nativeTraceExitGuard, wantCounter: -maxInt, wantAccumulator: 0, wantBudget: 8,
+		},
+		{
+			name: "Interrupt", frame: nativeTraceFrame{counter: 3, limit: 0, accumulator: 0, budget: 8}, interrupt: 1,
+			wantExit: nativeTraceExitInterrupt, wantCounter: 2, wantAccumulator: 3, wantBudget: 8,
+		},
+		{
+			name: "Profiler", frame: nativeTraceFrame{counter: 3, limit: 0, accumulator: 0, budget: 8}, profiler: 1,
+			wantExit: nativeTraceExitProfiler, wantCounter: 2, wantAccumulator: 3, wantBudget: 8,
+		},
+		{
+			name: "BoundedYield", frame: nativeTraceFrame{counter: 3, limit: -10, accumulator: 0, budget: 2},
+			wantExit: nativeTraceExitYield, wantCounter: 1, wantAccumulator: 5, wantBudget: 0,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			atomic.StoreUint32(&interrupt, test.interrupt)
+			atomic.StoreInt32(&profiler, test.profiler)
+			frame := test.frame
+			frame.interrupt = &interrupt
+			frame.profiler = &profiler
+			if got := native.run(&frame); got != test.wantExit {
+				t.Fatalf("exit: got %d, want %d", got, test.wantExit)
+			}
+			if frame.counter != test.wantCounter || frame.accumulator != test.wantAccumulator || frame.budget != test.wantBudget {
+				t.Fatalf("frame: counter/accumulator/budget=%d/%d/%d, want %d/%d/%d", frame.counter, frame.accumulator, frame.budget, test.wantCounter, test.wantAccumulator, test.wantBudget)
+			}
+		})
 	}
 }
 
@@ -288,6 +404,28 @@ func TestNativeTraceRuntimeExecutionAndYield(t *testing.T) {
 	}
 	if got := native.yields.Load(); got != 2 {
 		t.Fatalf("bounded yields: got %d, want 2", got)
+	}
+}
+
+func TestNativeDescendingTraceRuntimeExecutionAndYield(t *testing.T) {
+	runtime, call := setupTypedDescendingTraceTest(t)
+	for i := 0; i < 6; i++ {
+		callTypedDescendingTraceTest(t, call, valueInt(1000), valueInt(0), valueInt(0))
+	}
+	state := typedTraceState(runtime)
+	if state == nil || state.typed.nativeCode() == nil {
+		t.Fatal("descending loop did not activate native code")
+	}
+	native := state.typed.nativeCode()
+	native.yields.Store(0)
+	n := int64(nativeTraceIterationBudget*2 + 7)
+	result := callTypedDescendingTraceTest(t, call, valueInt(n), valueInt(0), valueInt(0))
+	want := n * (n + 1) / 2
+	if got := result.ToInteger(); got != want {
+		t.Fatalf("yielded descending result: got %d, want %d", got, want)
+	}
+	if got := native.yields.Load(); got != 2 {
+		t.Fatalf("bounded descending yields: got %d, want 2", got)
 	}
 }
 

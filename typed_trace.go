@@ -77,6 +77,9 @@ const (
 	typedTraceFloatAddLiteral
 	typedTraceFloatMultiplyLiteral
 	typedTraceFloatLiteralHigh
+	typedTraceExitUnlessGreater
+	typedTraceGuardDecrementRange
+	typedTraceDecrement
 )
 
 type typedTraceIR struct {
@@ -144,13 +147,32 @@ func (t *typedIntLoopTrace) execute(vm *vm, state *programTierState, entry *type
 		}
 	}
 	if entry.native == nil {
-		entry.native = state.typed.observeNativeEligibility(registers[typedTraceLimit]-registers[typedTraceCounter], compileNativeTrace)
+		entry.native = state.typed.observeNativeEligibility(t.remainingIterations(registers), compileNativeTrace)
 	}
 	if native := entry.native; native != nil {
 		t.executeNative(vm, state, entry, native, registers)
 		return
 	}
 	t.executeGo(vm, state, registers)
+}
+
+func (t *typedIntLoopTrace) remainingIterations(registers [typedTraceRegisterCount]int64) int64 {
+	if len(t.code) == 0 {
+		return 0
+	}
+	counter := registers[typedTraceCounter]
+	limit := registers[typedTraceLimit]
+	switch t.code[0].opcode {
+	case typedTraceExitUnlessLess:
+		if counter < limit {
+			return limit - counter
+		}
+	case typedTraceExitUnlessGreater:
+		if counter > limit {
+			return counter - limit
+		}
+	}
+	return 0
 }
 
 type nativeTraceCompiler func(*typedIntLoopTrace) (*nativeTraceCode, error)
@@ -221,6 +243,12 @@ func (t *typedIntLoopTrace) executeGo(vm *vm, state *programTierState, registers
 				vm.pc = operation.exitPC
 				return
 			}
+		case typedTraceExitUnlessGreater:
+			if registers[operation.left] <= registers[operation.right] {
+				t.materialize(vm, registers, t.deopts[operation.deopt].stackMap)
+				vm.pc = operation.exitPC
+				return
+			}
 		case typedTraceGuardAddRange:
 			result := registers[operation.left] + registers[operation.right]
 			if result < -maxInt || result > maxInt {
@@ -232,10 +260,17 @@ func (t *typedIntLoopTrace) executeGo(vm *vm, state *programTierState, registers
 				state.deoptTypedTrace(vm, t.deopts[operation.deopt], registers, true, true)
 				return
 			}
+		case typedTraceGuardDecrementRange:
+			if registers[operation.left] <= -maxInt {
+				state.deoptTypedTrace(vm, t.deopts[operation.deopt], registers, true, true)
+				return
+			}
 		case typedTraceAdd:
 			registers[operation.dst] = registers[operation.left] + registers[operation.right]
 		case typedTraceIncrement:
 			registers[operation.dst]++
+		case typedTraceDecrement:
+			registers[operation.dst]--
 		case typedTraceFloatAddLiteral:
 			ip++
 			literalBits := uint64(uint32(operation.exitPC)) | uint64(uint32(t.code[ip].exitPC))<<32
@@ -350,6 +385,7 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 		counter, counterOK := program.code[entryPC].(loadStack)
 		limit, limitOK := program.code[entryPC+1].(loadStackLex)
 		_, lessOK := program.code[entryPC+2].(_op_lt)
+		_, greaterOK := program.code[entryPC+2].(_op_gt)
 		exit, exitOK := program.code[entryPC+3].(jneP)
 		accumulator, accumulatorOK := program.code[entryPC+4].(loadStack)
 		bodyCounter, bodyCounterOK := program.code[entryPC+5].(loadStack)
@@ -357,10 +393,13 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 		accumulatorStore, accumulatorStoreOK := program.code[entryPC+7].(storeStackP)
 		updateCounter, updateCounterOK := program.code[entryPC+8].(loadStack)
 		_, incrementOK := program.code[entryPC+9].(_inc)
+		_, decrementOK := program.code[entryPC+9].(_dec)
 		counterStore, counterStoreOK := program.code[entryPC+10].(storeStackP)
 		backedge, backedgeOK := program.code[entryPC+11].(jump)
-		if !counterOK || !limitOK || !lessOK || !exitOK || !accumulatorOK || !bodyCounterOK || !addOK ||
-			!accumulatorStoreOK || !updateCounterOK || !incrementOK || !counterStoreOK || !backedgeOK {
+		ascending := lessOK && incrementOK
+		descending := greaterOK && decrementOK
+		if !counterOK || !limitOK || (!ascending && !descending) || !exitOK || !accumulatorOK || !bodyCounterOK || !addOK ||
+			!accumulatorStoreOK || !updateCounterOK || !counterStoreOK || !backedgeOK {
 			continue
 		}
 		if counter <= 0 || limit >= 0 || accumulator <= 0 || counter == accumulator ||
@@ -382,6 +421,14 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 			{register: typedTraceLimit, slot: limitSlot},
 			{register: typedTraceAccumulator, slot: accumulatorSlot},
 		}
+		exitOpcode := typedTraceExitUnlessLess
+		inductionGuardOpcode := typedTraceGuardIncrementRange
+		inductionOpcode := typedTraceIncrement
+		if descending {
+			exitOpcode = typedTraceExitUnlessGreater
+			inductionGuardOpcode = typedTraceGuardDecrementRange
+			inductionOpcode = typedTraceDecrement
+		}
 		return &typedIntLoopTrace{
 			entryPC: entryPC,
 			guards: []typedTraceGuard{
@@ -391,11 +438,11 @@ func lowerTypedIntegerLoopTraceAt(program *Program, hotBackedgePC int) *typedInt
 			},
 			deopts: []typedTraceDeopt{{pc: entryPC, stackMap: stackMap}},
 			code: []typedTraceIR{
-				{opcode: typedTraceExitUnlessLess, left: typedTraceCounter, right: typedTraceLimit, exitPC: exitPC},
+				{opcode: exitOpcode, left: typedTraceCounter, right: typedTraceLimit, exitPC: exitPC},
 				{opcode: typedTraceGuardAddRange, left: typedTraceAccumulator, right: typedTraceCounter},
-				{opcode: typedTraceGuardIncrementRange, left: typedTraceCounter},
+				{opcode: inductionGuardOpcode, left: typedTraceCounter},
 				{opcode: typedTraceAdd, dst: typedTraceAccumulator, left: typedTraceAccumulator, right: typedTraceCounter},
-				{opcode: typedTraceIncrement, dst: typedTraceCounter},
+				{opcode: inductionOpcode, dst: typedTraceCounter},
 				{opcode: typedTracePollBackedge},
 				{opcode: typedTraceJump, target: 0},
 			},
