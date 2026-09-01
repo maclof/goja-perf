@@ -672,7 +672,7 @@ func (vm *vm) runWithProfiler() bool {
 			break
 		}
 		code := vm.prg.code
-		if vm.tier != nil && vm.tier.quickProgram == vm.prg {
+		if vm.tier != nil && (vm.tier.quickProgram == vm.prg || vm.tier.typed != nil && vm.tier.typed.program == vm.prg) {
 			code = vm.tier.program.code
 		}
 		code[pc].exec(vm)

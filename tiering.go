@@ -21,6 +21,7 @@ type programTierState struct {
 	primarySet   bool
 	backedges    map[int]uint16
 	quickProgram *Program
+	typed        *typedTraceTierState
 	attempted    bool
 	blockCount   int
 }
@@ -64,7 +65,7 @@ func (s *programTierState) recordBackedge(pc int) {
 			s.primaryCount++
 		}
 		if s.primaryCount == tieringBackedgeThreshold {
-			s.quicken()
+			s.quicken(pc)
 		}
 		return
 	}
@@ -77,11 +78,11 @@ func (s *programTierState) recordBackedge(pc int) {
 		s.backedges[pc] = count
 	}
 	if count == tieringBackedgeThreshold {
-		s.quicken()
+		s.quicken(pc)
 	}
 }
 
-func (s *programTierState) quicken() {
+func (s *programTierState) quicken(hotBackedgePC int) {
 	s.attempted = true
 	code, blocks := buildQuickenedCode(s.program)
 	if blocks == 0 {
@@ -91,6 +92,19 @@ func (s *programTierState) quicken() {
 	quickProgram.code = code
 	s.quickProgram = &quickProgram
 	s.blockCount = blocks
+	if trace := lowerTypedIntLoopTraceAt(s.program, hotBackedgePC); trace != nil {
+		traceProgram := quickProgram
+		traceProgram.code = append([]instruction(nil), quickProgram.code...)
+		traceProgram.code[trace.entryPC] = &typedTraceEntry{state: s, trace: trace}
+		s.typed = &typedTraceTierState{trace: trace, program: &traceProgram}
+	}
+}
+
+func (s *programTierState) executableProgram() *Program {
+	if s.typed != nil && !s.typed.disabled {
+		return s.typed.program
+	}
+	return s.quickProgram
 }
 
 func quickenedCanContinue(vm *vm) bool {
@@ -304,14 +318,14 @@ func (vm *vm) setProgram(program *Program) {
 	vm.prg = program
 	vm.tier = vm.tiering.lookup(program)
 	if vm.tier != nil && vm.tier.quickProgram != nil && !quickenedProfiling() {
-		vm.prg = vm.tier.quickProgram
+		vm.prg = vm.tier.executableProgram()
 	}
 }
 
 func (vm *vm) recordBackedge(pc int) {
 	state := vm.tier
 	base := vm.prg
-	if state != nil && state.quickProgram == base {
+	if state != nil && (state.quickProgram == base || state.typed != nil && state.typed.program == base) {
 		base = state.program
 	}
 	if state == nil {
@@ -345,6 +359,6 @@ func (vm *vm) recordBackedge(pc int) {
 	}
 	state.recordBackedge(pc)
 	if state.quickProgram != nil && !quickenedProfiling() {
-		vm.prg = state.quickProgram
+		vm.prg = state.executableProgram()
 	}
 }

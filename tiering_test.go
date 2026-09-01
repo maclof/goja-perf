@@ -300,11 +300,11 @@ func TestRuntimeTieringBoundWithLiveFunctions(t *testing.T) {
 	var source strings.Builder
 	source.WriteString("var tierLiveFunctions = [\n")
 	for i := 0; i < functionCount; i++ {
-		source.WriteString("function() { var sum = 0; for (var i = 0; i < 40; i++) { sum += i; } return sum; },\n")
+		source.WriteString("function(n) { var sum = 0; for (var i = 0; i < n; i++) { sum += i; } return sum; },\n")
 	}
 	source.WriteString("];\n")
 	for i := 0; i < functionCount; i++ {
-		fmt.Fprintf(&source, "tierLiveFunctions[%d](); tierLiveFunctions[%d]();\n", i, i)
+		fmt.Fprintf(&source, "tierLiveFunctions[%d](40); tierLiveFunctions[%d](40);\n", i, i)
 	}
 
 	runtime := New()
@@ -316,6 +316,9 @@ func TestRuntimeTieringBoundWithLiveFunctions(t *testing.T) {
 	}
 	if got := quickenedProgramCount(runtime); got != maxTieringPrograms {
 		t.Fatalf("retained quickened program count: got %d, want %d", got, maxTieringPrograms)
+	}
+	if got := typedTraceCount(runtime); got != maxTieringPrograms {
+		t.Fatalf("retained typed trace count: got %d, want %d", got, maxTieringPrograms)
 	}
 
 	functions := runtime.Get("tierLiveFunctions").ToObject(runtime)
@@ -332,7 +335,7 @@ func TestRuntimeTieringBoundWithLiveFunctions(t *testing.T) {
 	if !ok {
 		t.Fatal("first retained value is not callable")
 	}
-	result, err := call(_undefined)
+	result, err := call(_undefined, valueInt(40))
 	if err != nil {
 		t.Fatal(err)
 	}
