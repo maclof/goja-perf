@@ -1,4 +1,4 @@
-//go:build windows && amd64
+//go:build (windows || linux) && amd64
 
 package goja
 
@@ -369,8 +369,17 @@ func TestNativeTraceMemoryRelease(t *testing.T) {
 	if err := native.memory.release(); err != nil {
 		t.Fatal(err)
 	}
+	if err := native.memory.release(); err != nil {
+		t.Fatalf("second release was not idempotent: %v", err)
+	}
 	if address := native.memory.address.Load(); address != 0 {
 		t.Fatalf("released address: got %#x, want 0", address)
+	}
+	if bytes := native.memory.bytes(); bytes != nil {
+		t.Fatalf("released code bytes: got %x, want nil", bytes)
+	}
+	if _, err := native.memory.protection(); err == nil {
+		t.Fatal("released mapping still reported memory protection")
 	}
 	var interrupt uint32
 	var profiler int32
