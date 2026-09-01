@@ -32,6 +32,55 @@ func BenchmarkRuntimeSetupForSandboxComparison(b *testing.B) {
 	}
 }
 
+func BenchmarkSandboxReset(b *testing.B) {
+	s, err := NewSandbox(SandboxPolicy{
+		Builtins: SandboxBuiltins{Allow: []string{"Math", "JSON"}},
+		Capabilities: map[string]interface{}{
+			"seed": 42,
+		},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := s.Reset(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSandboxRunProgramOverhead(b *testing.B) {
+	program := MustCompile("sandbox_overhead_bench.js", `42`, true)
+	s, err := NewSandbox(SandboxPolicy{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sandboxBenchmarkValue, err = s.RunProgram(program)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkRuntimeRunProgramForSandboxOverheadComparison(b *testing.B) {
+	program := MustCompile("sandbox_overhead_bench.js", `42`, true)
+	r := New()
+	var err error
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sandboxBenchmarkValue, err = r.RunProgram(program)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkSandboxSteadyState(b *testing.B) {
 	program := MustCompile("sandbox_bench.js", `
 		var sum = 0;

@@ -57,9 +57,10 @@ type SandboxPolicy struct {
 // State created by one execution remains available to later executions. Reset
 // discards that state and reapplies the original policy.
 type Sandbox struct {
-	mu      sync.Mutex
-	policy  SandboxPolicy
-	runtime *Runtime
+	mu             sync.Mutex
+	policy         SandboxPolicy
+	globalTemplate *objectTemplate
+	runtime        *Runtime
 }
 
 var sandboxBuiltinNames = []string{
@@ -71,6 +72,14 @@ var sandboxBuiltinNames = []string{
 	"Symbol", "WeakSet", "WeakMap", "Map", "Set", "Promise", "isNaN", "parseInt", "parseFloat",
 	"isFinite", "decodeURI", "decodeURIComponent", "encodeURI", "encodeURIComponent", "escape", "unescape",
 }
+
+var sandboxBuiltinNameSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(sandboxBuiltinNames))
+	for _, name := range sandboxBuiltinNames {
+		set[name] = struct{}{}
+	}
+	return set
+}()
 
 var sandboxReservedCapabilityNames = map[string]struct{}{
 	"globalThis":  {},
@@ -98,6 +107,7 @@ func NewSandbox(policy SandboxPolicy) (*Sandbox, error) {
 	}
 
 	s := &Sandbox{policy: cloneSandboxPolicy(policy)}
+	s.globalTemplate = newSandboxGlobalObjectTemplate(s.policy.Builtins)
 	if err := s.resetLocked(); err != nil {
 		return nil, err
 	}
@@ -168,38 +178,12 @@ func (s *Sandbox) resetLocked() error {
 	r := New()
 	r.disableDynamicCodeGeneration = !s.policy.AllowDynamicCode
 
-	visible := make(map[string]bool, len(sandboxBuiltinNames))
-	if s.policy.Builtins.AllowAll {
-		for _, name := range sandboxBuiltinNames {
-			visible[name] = true
-		}
-		for _, name := range s.policy.Builtins.Deny {
-			visible[name] = false
-		}
-	} else {
-		for _, name := range s.policy.Builtins.Allow {
-			visible[name] = true
-		}
+	global, ok := r.globalObject.self.(*templatedObject)
+	if !ok {
+		return errors.New("goja: sandbox global object is not template-backed")
 	}
+	global.tmpl = s.globalTemplate
 
-	global := r.GlobalObject()
-	for _, name := range sandboxBuiltinNames {
-		if !visible[name] {
-			// The global object is template-backed on a fresh Runtime. Marking
-			// a template property as absent avoids constructing every denied
-			// built-in merely to delete it.
-			if templated, ok := global.self.(*templatedObject); ok {
-				propertyName := unistring.NewFromString(name)
-				if _, exists := templated.tmpl.props[propertyName]; exists {
-					templated.values[propertyName] = nil
-					continue
-				}
-			}
-			if err := global.Delete(name); err != nil {
-				return fmt.Errorf("remove sandbox built-in %q: %w", name, err)
-			}
-		}
-	}
 	for name, capability := range s.policy.Capabilities {
 		if err := r.Set(name, capability); err != nil {
 			return fmt.Errorf("install sandbox capability %q: %w", name, err)
@@ -210,6 +194,47 @@ func (s *Sandbox) resetLocked() error {
 	return nil
 }
 
+func newSandboxGlobalObjectTemplate(policy SandboxBuiltins) *objectTemplate {
+	base := getGlobalObjectTemplate()
+	visible := func(name string) bool {
+		names := policy.Allow
+		result := false
+		if policy.AllowAll {
+			names = policy.Deny
+			result = true
+		}
+		for _, candidate := range names {
+			if name == candidate {
+				return !result
+			}
+		}
+		return result
+	}
+
+	count := 0
+	for _, name := range base.propNames {
+		if _, controlled := sandboxBuiltinNameSet[name.String()]; !controlled || visible(name.String()) {
+			count++
+		}
+	}
+
+	template := &objectTemplate{
+		propNames:    make([]unistring.String, 0, count),
+		props:        make(map[unistring.String]templatePropFactory, count),
+		symProps:     base.symProps,
+		symPropNames: base.symPropNames,
+		protoFactory: base.protoFactory,
+	}
+	for _, name := range base.propNames {
+		if _, controlled := sandboxBuiltinNameSet[name.String()]; controlled && !visible(name.String()) {
+			continue
+		}
+		template.propNames = append(template.propNames, name)
+		template.props[name] = base.props[name]
+	}
+	return template
+}
+
 func validateSandboxPolicy(policy SandboxPolicy) error {
 	if policy.ExecutionTimeout < 0 {
 		return errors.New("goja: sandbox execution timeout must not be negative")
@@ -218,15 +243,11 @@ func validateSandboxPolicy(policy SandboxPolicy) error {
 		return errors.New("goja: sandbox built-in Allow must be empty when AllowAll is true")
 	}
 
-	known := make(map[string]struct{}, len(sandboxBuiltinNames))
-	for _, name := range sandboxBuiltinNames {
-		known[name] = struct{}{}
-	}
-	allow, err := validateSandboxBuiltinList("Allow", policy.Builtins.Allow, known)
+	allow, err := validateSandboxBuiltinList("Allow", policy.Builtins.Allow, sandboxBuiltinNameSet)
 	if err != nil {
 		return err
 	}
-	deny, err := validateSandboxBuiltinList("Deny", policy.Builtins.Deny, known)
+	deny, err := validateSandboxBuiltinList("Deny", policy.Builtins.Deny, sandboxBuiltinNameSet)
 	if err != nil {
 		return err
 	}
@@ -240,7 +261,7 @@ func validateSandboxPolicy(policy SandboxPolicy) error {
 		if name == "" {
 			return errors.New("goja: sandbox capability name must not be empty")
 		}
-		if _, exists := known[name]; exists {
+		if _, exists := sandboxBuiltinNameSet[name]; exists {
 			return fmt.Errorf("goja: sandbox capability %q conflicts with a standard built-in", name)
 		}
 		if _, reserved := sandboxReservedCapabilityNames[name]; reserved {

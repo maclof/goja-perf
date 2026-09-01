@@ -72,6 +72,35 @@ func TestSandboxBuiltinDenylist(t *testing.T) {
 	if got, want := v.String(), "undefined,undefined,object,function"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
+	names := make(map[string]bool)
+	for _, name := range s.runtime.GlobalObject().GetOwnPropertyNames() {
+		names[name] = true
+	}
+	if names["Date"] || names["eval"] {
+		t.Fatalf("denied built-ins remained enumerable: %v", names)
+	}
+	if !names["JSON"] || !names["Map"] {
+		t.Fatalf("allowed built-ins were not enumerable: %v", names)
+	}
+}
+
+func TestSandboxAllowsScriptDefinedFunctions(t *testing.T) {
+	s := mustSandbox(t, SandboxPolicy{})
+	v, err := s.RunString(`
+		function outer(value) {
+			var closure = function(addend) { return value + addend; };
+			return closure;
+		}
+		var object = { method: function() { return outer(19)(20); } };
+		class Example { method() { return 3; } }
+		object.method() + new Example().method();
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.ToInteger(); got != 42 {
+		t.Fatalf("got %d, want 42", got)
+	}
 }
 
 func TestSandboxDynamicCodeDeniedThroughAllConstructorPaths(t *testing.T) {
