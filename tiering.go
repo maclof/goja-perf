@@ -347,6 +347,18 @@ func buildQuickenedCodeWithTrackedBackedge(program *Program, trackedBackedgePC i
 				}
 			}
 		}
+		switch ins := program.code[pc].(type) {
+		case resolveVar1:
+			code[pc] = newQuickenedResolveVar1(ins)
+			blocks++
+			pc++
+			continue
+		case resolveVar1Strict:
+			code[pc] = newQuickenedResolveVar1Strict(ins)
+			blocks++
+			pc++
+			continue
+		}
 		pc++
 	}
 	if blocks == 0 {

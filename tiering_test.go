@@ -450,6 +450,13 @@ func TestQuickenedThrowPCEquivalence(t *testing.T) {
 			wantPC: 1,
 			blocks: 1,
 		},
+		{
+			name:   "StrictGlobalResolution",
+			code:   []instruction{resolveVar1Strict("missingGlobal"), getValue},
+			slots:  func() []Value { return []Value{_undefined} },
+			wantPC: 1,
+			blocks: 1,
+		},
 	}
 
 	for _, test := range tests {
