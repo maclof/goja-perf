@@ -13,9 +13,9 @@ import (
 	"runtime/pprof"
 	"time"
 
-	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/console"
-	"github.com/dop251/goja_nodejs/require"
+	"github.com/maclof/goja-perf"
+	"github.com/maclof/goja-perf/internal/goja_nodejs/console"
+	"github.com/maclof/goja-perf/internal/goja_nodejs/require"
 )
 
 var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")

@@ -54,7 +54,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dop251/goja"
+	"github.com/maclof/goja-perf"
 )
 
 // workloadNames must match the *.js files in the workloads directory and the

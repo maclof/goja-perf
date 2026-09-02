@@ -1,6 +1,6 @@
 package goja
 
-import "github.com/dop251/goja/unistring"
+import "github.com/maclof/goja-perf/unistring"
 
 // quickenedResolveVar1 preserves dynamic environment resolution but reuses the
 // immutable global reference object on the common miss-through-stashes path.

@@ -12,7 +12,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"github.com/dop251/goja/unistring"
+	"github.com/maclof/goja-perf/unistring"
 )
 
 const hex = "0123456789abcdef"

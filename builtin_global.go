@@ -10,7 +10,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"github.com/dop251/goja/unistring"
+	"github.com/maclof/goja-perf/unistring"
 )
 
 const hexUpper = "0123456789ABCDEF"

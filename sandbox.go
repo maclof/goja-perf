@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja/unistring"
+	"github.com/maclof/goja-perf/unistring"
 )
 
 // ErrSandboxTimeout is wrapped by the *InterruptedError returned when a

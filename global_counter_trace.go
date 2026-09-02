@@ -3,7 +3,7 @@ package goja
 import (
 	"sync/atomic"
 
-	"github.com/dop251/goja/unistring"
+	"github.com/maclof/goja-perf/unistring"
 )
 
 // globalCounterTrace is a Runtime-owned lowered representation of the exact

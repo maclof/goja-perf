@@ -13,8 +13,8 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
-	"github.com/dop251/goja/parser"
-	"github.com/dop251/goja/unistring"
+	"github.com/maclof/goja-perf/parser"
+	"github.com/maclof/goja-perf/unistring"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 )

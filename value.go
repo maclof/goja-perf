@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"unsafe"
 
-	"github.com/dop251/goja/ftoa"
-	"github.com/dop251/goja/unistring"
+	"github.com/maclof/goja-perf/ftoa"
+	"github.com/maclof/goja-perf/unistring"
 )
 
 var (
