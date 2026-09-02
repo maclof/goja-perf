@@ -12,19 +12,3 @@ TEXT ·runNativeTrace(SB), NOSPLIT, $0-20
 	CALL AX
 	MOVL AX, ret+16(FP)
 	RET
-
-// These bounded byte copies avoid manufacturing Go slices that point at
-// VirtualAlloc memory. Neither helper retains a Go pointer.
-TEXT ·copyNativeTraceBytes(SB), NOSPLIT, $0-24
-	MOVQ dst+0(FP), DI
-	MOVQ src+8(FP), SI
-	MOVQ size+16(FP), CX
-	REP; MOVSB
-	RET
-
-TEXT ·readNativeTraceBytes(SB), NOSPLIT, $0-24
-	MOVQ dst+0(FP), DI
-	MOVQ src+8(FP), SI
-	MOVQ size+16(FP), CX
-	REP; MOVSB
-	RET

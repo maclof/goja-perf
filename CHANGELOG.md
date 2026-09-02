@@ -6,6 +6,13 @@ version tags for fork releases.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-02
+
+### Fixed
+
+- Restored Linux CI and `go vet` by moving the Windows-only native-trace byte
+  copy assembly routines alongside their Windows-only Go declarations.
+
 ## [0.2.0] - 2026-09-02
 
 ### Changed
@@ -69,7 +76,8 @@ version tags for fork releases.
 - Optimized sandbox creation and reset by reusing a policy-filtered global
   template.
 
-[Unreleased]: https://github.com/maclof/goja-perf/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/maclof/goja-perf/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/maclof/goja-perf/releases/tag/v0.2.1
 [0.2.0]: https://github.com/maclof/goja-perf/releases/tag/v0.2.0
 [0.1.1]: https://github.com/maclof/goja-perf/releases/tag/v0.1.1
 [0.1.0]: https://github.com/maclof/goja-perf/releases/tag/v0.1.0

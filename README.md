@@ -60,7 +60,7 @@ boundary.
 Install the latest v0.2 release and import the canonical module path:
 
 ```sh
-go get github.com/maclof/goja-perf@v0.2.0
+go get github.com/maclof/goja-perf@v0.2.1
 ```
 
 ```go
