@@ -12,6 +12,12 @@ import (
 	"unsafe"
 )
 
+//go:noescape
+func copyNativeTraceBytes(dst uintptr, src *byte, size uintptr)
+
+//go:noescape
+func readNativeTraceBytes(dst *byte, src uintptr, size uintptr)
+
 const (
 	memCommit  = 0x1000
 	memReserve = 0x2000

@@ -54,12 +54,6 @@ type nativeTraceCode struct {
 //go:noescape
 func runNativeTrace(code uintptr, frame *nativeTraceFrame) nativeTraceExit
 
-//go:noescape
-func copyNativeTraceBytes(dst uintptr, src *byte, size uintptr)
-
-//go:noescape
-func readNativeTraceBytes(dst *byte, src uintptr, size uintptr)
-
 func compileNativeTrace(trace *typedIntLoopTrace) (*nativeTraceCode, error) {
 	shape, supported := nativeTraceIRLoopShape(trace)
 	if !supported {
@@ -77,11 +71,6 @@ func compileNativeTrace(trace *typedIntLoopTrace) (*nativeTraceCode, error) {
 		return nil, err
 	}
 	return &nativeTraceCode{memory: memory}, nil
-}
-
-func nativeTraceIRSupported(trace *typedIntLoopTrace) bool {
-	_, supported := nativeTraceIRLoopShape(trace)
-	return supported
 }
 
 func nativeTraceIRLoopShape(trace *typedIntLoopTrace) (shape typedTraceLoopShape, supported bool) {

@@ -129,7 +129,7 @@ func TestTypedInclusiveTraceFinalInductionState(t *testing.T) {
 	callTypedInclusiveTraceTest(t, runtime, call, valueInt(0), valueInt(127), valueInt(0))
 	sum, counter := callTypedInclusiveTraceTest(t, runtime, call, valueInt(maxInt-1), valueInt(maxInt-1), valueInt(0))
 	if !sum.StrictEquals(valueInt(maxInt-1)) || !counter.StrictEquals(valueInt(maxInt)) {
-		t.Fatalf("final induction: sum/counter=%v/%v, want %d/%d", sum, counter, maxInt-1, maxInt)
+		t.Fatalf("final induction: sum/counter=%v/%v, want %d/%d", sum, counter, int64(maxInt-1), int64(maxInt))
 	}
 	state := typedTraceState(runtime)
 	if state == nil || state.typed.disabled() || state.typed.guardFailures != 0 {
