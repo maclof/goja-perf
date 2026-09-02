@@ -6,6 +6,22 @@ version tags for fork releases.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-02
+
+### Added
+
+- Runnable package documentation examples for creating a standard runtime and
+  a deny-by-default sandbox with an explicit built-in allowlist and narrow host
+  capability.
+- A dedicated Codecov workflow using GitHub OIDC authentication, plus a live
+  coverage badge alongside the existing platform-specific build badges.
+- Independent Windows/amd64 and Linux/amd64 build workflows and badges, while
+  retaining Linux/386 portability coverage and the Linux formatting gate.
+
+### Documentation
+
+- Updated installation examples for the v0.2.2 release.
+
 ## [0.2.1] - 2026-09-02
 
 ### Fixed
@@ -76,7 +92,8 @@ version tags for fork releases.
 - Optimized sandbox creation and reset by reusing a policy-filtered global
   template.
 
-[Unreleased]: https://github.com/maclof/goja-perf/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/maclof/goja-perf/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/maclof/goja-perf/releases/tag/v0.2.2
 [0.2.1]: https://github.com/maclof/goja-perf/releases/tag/v0.2.1
 [0.2.0]: https://github.com/maclof/goja-perf/releases/tag/v0.2.0
 [0.1.1]: https://github.com/maclof/goja-perf/releases/tag/v0.1.1
