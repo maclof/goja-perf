@@ -1,11 +1,15 @@
 # goja-perf
 
+[![Build Status](https://github.com/maclof/goja-perf/actions/workflows/main.yml/badge.svg?branch=master)](https://github.com/maclof/goja-perf/actions/workflows/main.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/maclof/goja-perf.svg)](https://pkg.go.dev/github.com/maclof/goja-perf)
+
 `goja-perf` is a performance-focused, API-compatible fork of
 [`dop251/goja`](https://github.com/dop251/goja). It keeps upstream Goja's pure-Go
-JavaScript engine and public import path, while adding measured execution and
-Go/JavaScript-boundary optimizations, a representative benchmark suite, and an
-opt-in capability sandbox. It is intended as a drop-in replacement, but it is an
-independent fork rather than an upstream Goja release.
+JavaScript engine and API shape under its own module path, while adding measured
+execution and Go/JavaScript-boundary optimizations, a representative benchmark
+suite, and an opt-in capability sandbox. The package name remains `goja`; only
+the import path changes. This is an independent fork rather than an upstream
+Goja release.
 
 ## What is different
 
@@ -51,35 +55,34 @@ every program receives the same speedup. Benefits depend on workload shape,
 warmup, data types, platform, and how often code crosses the Go/JavaScript
 boundary.
 
-## Install as a drop-in replacement
+## Install
 
-Keep existing imports unchanged:
-
-```go
-import "github.com/dop251/goja"
-```
-
-Require Goja normally, then replace it with a tagged goja-perf release:
+Install the latest v0.2 release and import the canonical module path:
 
 ```sh
-go get github.com/dop251/goja@latest
-go mod edit -replace=github.com/dop251/goja=github.com/maclof/goja-perf@v0.1.1
-go mod tidy
-go test ./...
+go get github.com/maclof/goja-perf@v0.2.0
 ```
 
-The resulting `go.mod` contains a rule like:
+```go
+import "github.com/maclof/goja-perf"
 
-```go.mod
-replace github.com/dop251/goja => github.com/maclof/goja-perf v0.1.1
+vm := goja.New()
 ```
 
-This repository deliberately retains `module github.com/dop251/goja` in its own
-`go.mod`: existing source code and dependent modules continue to agree on one
-Go type identity and no imports need rewriting. The consumer-side `replace`
-selects this fork's source. Pin a release tag for reproducible builds. To test a
-specific commit or branch before a release, substitute its pseudo-version or
-`@master`; `go mod tidy` resolves a branch to a pseudo-version.
+### Migrating from upstream or v0.1.x
+
+Change imports from `github.com/dop251/goja` to
+`github.com/maclof/goja-perf`, remove the old consumer-side `replace` rule, then
+run `go mod tidy` and your test suite. v0.2.0 intentionally changes the Go
+module identity, so values such as `*goja.Runtime` from the upstream module and
+this fork are distinct Go types even though the APIs match. Every integration
+that exchanges Goja values must use the same canonical module path.
+
+The upstream `goja_nodejs` module currently imports upstream Goja and therefore
+does not share this fork's type identity. The bundled `goja` command uses an
+internal compatibility copy of its `console`, `require`, and `util` support;
+applications using other `goja_nodejs` packages need a module-path-compatible
+fork or adapter.
 
 ## Sandbox example
 
@@ -141,8 +144,6 @@ goja
 ====
 
 ECMAScript 5.1(+) implementation in Go.
-
-[![Go Reference](https://pkg.go.dev/badge/github.com/dop251/goja.svg)](https://pkg.go.dev/github.com/dop251/goja)
 
 Goja is an implementation of ECMAScript 5.1 in pure Go with emphasis on standard compliance and
 performance.
@@ -263,13 +264,13 @@ if num := v.Export().(int64); num != 4 {
 
 Passing Values to JS
 --------------------
-Any Go value can be passed to JS using Runtime.ToValue() method. See the method's [documentation](https://pkg.go.dev/github.com/dop251/goja#Runtime.ToValue) for more details.
+Any Go value can be passed to JS using Runtime.ToValue() method. See the method's [documentation](https://pkg.go.dev/github.com/maclof/goja-perf#Runtime.ToValue) for more details.
 
 Exporting Values from JS
 ------------------------
 A JS value can be exported into its default Go representation using Value.Export() method.
 
-Alternatively it can be exported into a specific Go variable using [Runtime.ExportTo()](https://pkg.go.dev/github.com/dop251/goja#Runtime.ExportTo) method.
+Alternatively it can be exported into a specific Go variable using [Runtime.ExportTo()](https://pkg.go.dev/github.com/maclof/goja-perf#Runtime.ExportTo) method.
 
 Within a single export operation the same Object will be represented by the same Go value (either the same map, slice or
 a pointer to the same struct). This includes circular objects and makes it possible to export them.
@@ -278,7 +279,7 @@ Calling JS functions from Go
 ----------------------------
 There are 2 approaches:
 
-- Using [AssertFunction()](https://pkg.go.dev/github.com/dop251/goja#AssertFunction):
+- Using [AssertFunction()](https://pkg.go.dev/github.com/maclof/goja-perf#AssertFunction):
 ```go
 const SCRIPT = `
 function sum(a, b) {
@@ -303,7 +304,7 @@ if err != nil {
 fmt.Println(res)
 // Output: 42
 ```
-- Using [Runtime.ExportTo()](https://pkg.go.dev/github.com/dop251/goja#Runtime.ExportTo):
+- Using [Runtime.ExportTo()](https://pkg.go.dev/github.com/maclof/goja-perf#Runtime.ExportTo):
 ```go
 const SCRIPT = `
 function sum(a, b) {
@@ -334,7 +335,7 @@ Mapping struct field and method names
 -------------------------------------
 By default, the names are passed through as is which means they are capitalised. This does not match
 the standard JavaScript naming convention, so if you need to make your JS code look more natural or if you are
-dealing with a 3rd party library, you can use a [FieldNameMapper](https://pkg.go.dev/github.com/dop251/goja#FieldNameMapper):
+dealing with a 3rd party library, you can use a [FieldNameMapper](https://pkg.go.dev/github.com/maclof/goja-perf#FieldNameMapper):
 
 ```go
 vm := goja.New()
@@ -348,14 +349,14 @@ fmt.Println(res.Export())
 // Output: 42
 ```
 
-There are two standard mappers: [TagFieldNameMapper](https://pkg.go.dev/github.com/dop251/goja#TagFieldNameMapper) and
-[UncapFieldNameMapper](https://pkg.go.dev/github.com/dop251/goja#UncapFieldNameMapper), or you can use your own implementation.
+There are two standard mappers: [TagFieldNameMapper](https://pkg.go.dev/github.com/maclof/goja-perf#TagFieldNameMapper) and
+[UncapFieldNameMapper](https://pkg.go.dev/github.com/maclof/goja-perf#UncapFieldNameMapper), or you can use your own implementation.
 
 Native Constructors
 -------------------
 
 In order to implement a constructor function in Go use `func (goja.ConstructorCall) *goja.Object`.
-See [Runtime.ToValue()](https://pkg.go.dev/github.com/dop251/goja#Runtime.ToValue) documentation for more details.
+See [Runtime.ToValue()](https://pkg.go.dev/github.com/maclof/goja-perf#Runtime.ToValue) documentation for more details.
 
 Regular Expressions
 -------------------

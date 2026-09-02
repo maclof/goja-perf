@@ -6,6 +6,27 @@ version tags for fork releases.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-02
+
+### Changed
+
+- **Breaking:** changed the canonical Go module path from
+  `github.com/dop251/goja` to `github.com/maclof/goja-perf`. Consumers must
+  update imports and remove the v0.1.x replacement directive.
+- Embedded the small `console`, `require`, and `util` compatibility subset used
+  by the command-line interpreter so it shares goja-perf's Go type identity.
+
+### Fixed
+
+- Restored Linux/386 CI by avoiding an overflowing test-only `int` conversion.
+- Restored static analysis on Linux by keeping Windows-only native-trace
+  declarations in their platform-specific file and removing an unused helper.
+
+### Documentation
+
+- Added build-status and Go Reference badges and direct v0.2 installation and
+  migration instructions.
+
 ## [0.1.1] - 2026-09-02
 
 ### Added
@@ -48,6 +69,7 @@ version tags for fork releases.
 - Optimized sandbox creation and reset by reusing a policy-filtered global
   template.
 
-[Unreleased]: https://github.com/maclof/goja-perf/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/maclof/goja-perf/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/maclof/goja-perf/releases/tag/v0.2.0
 [0.1.1]: https://github.com/maclof/goja-perf/releases/tag/v0.1.1
 [0.1.0]: https://github.com/maclof/goja-perf/releases/tag/v0.1.0

@@ -3,13 +3,13 @@
 ## Supported versions
 
 Security fixes are provided for the latest tagged goja-perf release. During the
-initial release line, that means the latest `v0.1.x` version. Older tags and
+current release line, that means the latest `v0.2.x` version. Older tags and
 arbitrary historical commits are not supported; users should reproduce an issue
 on the latest release before reporting it.
 
 | Version | Supported |
 |---|---|
-| Latest `v0.1.x` | Yes |
+| Latest `v0.2.x` | Yes |
 | Older releases and commits | No |
 
 ## Reporting a vulnerability
