@@ -1,7 +1,8 @@
 # goja-perf
 
-[![Build Status](https://github.com/maclof/goja-perf/actions/workflows/main.yml/badge.svg?branch=master)](https://github.com/maclof/goja-perf/actions/workflows/main.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/maclof/goja-perf.svg)](https://pkg.go.dev/github.com/maclof/goja-perf)
+[![windows-amd64](https://github.com/maclof/goja-perf/actions/workflows/windows-amd64.yml/badge.svg?branch=master)](https://github.com/maclof/goja-perf/actions/workflows/windows-amd64.yml)
+[![linux-amd64](https://github.com/maclof/goja-perf/actions/workflows/linux-amd64.yml/badge.svg?branch=master)](https://github.com/maclof/goja-perf/actions/workflows/linux-amd64.yml)
 
 `goja-perf` is a performance-focused, API-compatible fork of
 [`dop251/goja`](https://github.com/dop251/goja). It keeps upstream Goja's pure-Go

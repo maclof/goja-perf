@@ -1,0 +1,63 @@
+name: windows-amd64
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-amd64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Go ${{ matrix.go-version }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: [1.25.x, 1.x]
+    env:
+      GOARCH: amd64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          check-latest: true
+          architecture: x64
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        if: ${{ matrix.go-version == '1.x' }}
+        shell: pwsh
+        run: |
+          $unformatted = @(gofmt -l .)
+          if ($unformatted.Count -ne 0) {
+            $unformatted | Write-Output
+            throw 'gofmt check failed'
+          }
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run staticcheck
+        if: ${{ matrix.go-version == '1.x' }}
+        uses: dominikh/staticcheck-action@v1.4.1
+        with:
+          version: "2026.2"
+          install-go: false
+          # v1.4.1 embeds actions/cache@v4 (Node 20). setup-go still caches Go
+          # downloads/builds; disable only Staticcheck's private cache until
+          # the action updates its embedded cache runtime.
+          use-cache: false
+
+      - name: Run tests
+        run: go test -vet=off ./...
