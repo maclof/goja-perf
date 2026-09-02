@@ -63,7 +63,7 @@ Require Goja normally, then replace it with a tagged goja-perf release:
 
 ```sh
 go get github.com/dop251/goja@latest
-go mod edit -replace=github.com/dop251/goja=github.com/maclof/goja-perf@v0.1.0
+go mod edit -replace=github.com/dop251/goja=github.com/maclof/goja-perf@v0.1.1
 go mod tidy
 go test ./...
 ```
@@ -71,7 +71,7 @@ go test ./...
 The resulting `go.mod` contains a rule like:
 
 ```go.mod
-replace github.com/dop251/goja => github.com/maclof/goja-perf v0.1.0
+replace github.com/dop251/goja => github.com/maclof/goja-perf v0.1.1
 ```
 
 This repository deliberately retains `module github.com/dop251/goja` in its own
