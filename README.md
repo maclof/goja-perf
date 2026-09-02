@@ -3,6 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/maclof/goja-perf.svg)](https://pkg.go.dev/github.com/maclof/goja-perf)
 [![windows-amd64](https://github.com/maclof/goja-perf/actions/workflows/windows-amd64.yml/badge.svg?branch=master)](https://github.com/maclof/goja-perf/actions/workflows/windows-amd64.yml)
 [![linux-amd64](https://github.com/maclof/goja-perf/actions/workflows/linux-amd64.yml/badge.svg?branch=master)](https://github.com/maclof/goja-perf/actions/workflows/linux-amd64.yml)
+[![codecov](https://codecov.io/github/maclof/goja-perf/branch/master/graph/badge.svg)](https://app.codecov.io/github/maclof/goja-perf)
 
 `goja-perf` is a performance-focused, API-compatible fork of
 [`dop251/goja`](https://github.com/dop251/goja). It keeps upstream Goja's pure-Go
@@ -61,7 +62,7 @@ boundary.
 Install the latest v0.2 release and import the canonical module path:
 
 ```sh
-go get github.com/maclof/goja-perf@v0.2.1
+go get github.com/maclof/goja-perf@v0.2.2
 ```
 
 ```go

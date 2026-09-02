@@ -5,3 +5,4 @@ testdata/test262
 *.test.exe
 *.pprof
 /step_*.txt
+/coverage.out
