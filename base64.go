@@ -3,6 +3,7 @@ package goja
 import (
 	"errors"
 	"strconv"
+	"strings"
 )
 
 type base64LastChunkHandling uint8
@@ -48,6 +49,15 @@ func skipAsciiWhitespace(s String, index int) int {
 		}
 	}
 	return index
+}
+
+func isBase64AsciiWhitespace(c byte) bool {
+	switch c {
+	case 0x09, 0x0A, 0x0C, 0x0D, 0x20:
+		return true
+	default:
+		return false
+	}
 }
 
 func base64Assemble32Checked(n1, n2, n3, n4 byte) uint32 {
@@ -129,9 +139,53 @@ func decodeFinalBase64Chunk(chunk [4]byte, chunkLength int, throwOnExtraBits boo
 func fromBase64(s String, decodeMap *[256]byte, lastChunkHandling base64LastChunkHandling) (read int, bytes []byte, err error) {
 	// 4 characters of input decode into at most 3 bytes, so a buffer of the
 	// upper-bound size makes fromBase64Into behave as if maxLength were absent.
-	dst := make([]byte, (s.Length()+3)/4*3)
+	dst := make([]byte, base64DecodedCapacity(s, decodeMap))
 	read, written, err := fromBase64Into(s, decodeMap, lastChunkHandling, dst)
-	return read, dst[:written], err
+	decoded := dst[:written]
+	if err == nil && cap(decoded) > written+64 && cap(decoded) > written+written/8 {
+		// Do not let a short result retain an input-sized backing array. The
+		// preflight below avoids this copy for common whitespace-heavy inputs;
+		// this is a fallback for whitespace appearing beyond its probe window.
+		decoded = append([]byte(nil), decoded...)
+	}
+	return read, decoded, err
+}
+
+// base64DecodedCapacity keeps the clean-input path to a bounded probe while
+// avoiding input-sized allocations for the common large whitespace-heavy and
+// early-invalid cases. The returned capacity still leaves enough room for the
+// decoder to reach a discovered invalid character and report it.
+func base64DecodedCapacity(s String, decodeMap *[256]byte) int {
+	length := s.Length()
+	upperBound := (length + 3) / 4 * 3
+	a, ok := s.(asciiString)
+	if !ok || length == 0 {
+		return upperBound
+	}
+
+	probeLength := min(length, 80) // Includes the first newline of 76-column PEM data.
+	hasWhitespace := false
+	significantInProbe := 0
+	for i := 0; i < probeLength; i++ {
+		c := a[i]
+		if isBase64AsciiWhitespace(c) {
+			hasWhitespace = true
+			continue
+		}
+		if c != '=' && decodeMap[c] == 0xff {
+			return min(upperBound, (significantInProbe+3)/4*3+3)
+		}
+		significantInProbe++
+	}
+	if length < 128 || !hasWhitespace {
+		return upperBound
+	}
+
+	input := string(a)
+	whitespace := strings.Count(input, " ") + strings.Count(input, "\t") +
+		strings.Count(input, "\n") + strings.Count(input, "\f") + strings.Count(input, "\r")
+	significant := length - whitespace
+	return (significant + 3) / 4 * 3
 }
 
 // Decode a base64-encoded ASCII string.
@@ -158,11 +212,7 @@ func base64DecodeAscii(a asciiString, s String, decodeMap *[256]byte, lastChunkH
 			written += 6
 			read += 8
 		} else {
-			var eof bool
-			read, written, eof, err = base64DecodeChunk(s, read, len(a), decodeMap, lastChunkHandling, dst, written)
-			if eof || err != nil {
-				return
-			}
+			return base64DecodeAsciiFallback(a, decodeMap, lastChunkHandling, dst, read, written)
 		}
 	}
 
@@ -178,11 +228,7 @@ func base64DecodeAscii(a asciiString, s String, decodeMap *[256]byte, lastChunkH
 			written += 3
 			read += 4
 		} else {
-			var eof bool
-			read, written, eof, err = base64DecodeChunk(s, read, len(a), decodeMap, lastChunkHandling, dst, written)
-			if eof || err != nil {
-				return
-			}
+			return base64DecodeAsciiFallback(a, decodeMap, lastChunkHandling, dst, read, written)
 		}
 	}
 
@@ -190,13 +236,136 @@ func base64DecodeAscii(a asciiString, s String, decodeMap *[256]byte, lastChunkH
 		return
 	}
 
-	for eof := false; !eof; {
-		read, written, eof, err = base64DecodeChunk(s, read, len(a), decodeMap, lastChunkHandling, dst, written)
-		if err != nil {
-			return
+	return base64DecodeAsciiFallback(a, decodeMap, lastChunkHandling, dst, read, written)
+}
+
+// base64DecodeAsciiFallback handles whitespace, padding and final chunks while
+// keeping the chunk state across the rest of the input. In particular, it does
+// not return to the fast loop after every whitespace-separated quartet.
+func base64DecodeAsciiFallback(a asciiString, decodeMap *[256]byte, lastChunkHandling base64LastChunkHandling, dst []byte, committedRead, written int) (read, newWritten int, err error) {
+	length := len(a)
+	index := committedRead
+	var chunk [4]byte
+	chunkLength := 0
+
+	for {
+		if chunkLength == 0 {
+			for strconv.IntSize >= 64 && length-index >= 8 && len(dst)-written >= 6 {
+				src := a[index : index+8]
+				dn, ok := base64Assemble64(
+					decodeMap[src[0]], decodeMap[src[1]], decodeMap[src[2]], decodeMap[src[3]],
+					decodeMap[src[4]], decodeMap[src[5]], decodeMap[src[6]], decodeMap[src[7]],
+				)
+				if !ok {
+					break
+				}
+				base64Put6Bytes(dst[written:], dn)
+				index += 8
+				committedRead = index
+				written += 6
+			}
+			for length-index >= 4 && len(dst)-written >= 3 {
+				src := a[index : index+4]
+				dn, ok := base64Assemble32(
+					decodeMap[src[0]], decodeMap[src[1]], decodeMap[src[2]], decodeMap[src[3]],
+				)
+				if !ok {
+					break
+				}
+				base64Put3Bytes(dst[written:], dn)
+				index += 4
+				committedRead = index
+				written += 3
+			}
+			if written == len(dst) {
+				return committedRead, written, nil
+			}
+		}
+
+		beforeWhitespace := index
+		for index < length && isBase64AsciiWhitespace(a[index]) {
+			index++
+		}
+		if index == length {
+			if chunkLength > 0 {
+				if lastChunkHandling == base64LastChunkHandlingStop {
+					return committedRead, written, nil
+				}
+				if lastChunkHandling == base64LastChunkHandlingStrict {
+					return committedRead, written, errors.New("missing padding in the last chunk")
+				}
+				if chunkLength == 1 {
+					return committedRead, written, errors.New("a single extra base64 character in the last chunk")
+				}
+				clear(chunk[chunkLength:])
+				dec, n, _ := decodeFinalBase64Chunk(chunk, chunkLength, false)
+				written += copy(dst[written:], dec[:n])
+			}
+			return length, written, nil
+		}
+		if chunkLength == 0 && index != beforeWhitespace {
+			continue
+		}
+
+		char := a[index]
+		index++
+		if char == '=' {
+			if chunkLength < 2 {
+				return committedRead, written, errors.New("unexpected padding character")
+			}
+			for index < length && isBase64AsciiWhitespace(a[index]) {
+				index++
+			}
+			if chunkLength == 2 {
+				if index == length {
+					if lastChunkHandling == base64LastChunkHandlingStop {
+						return committedRead, written, nil
+					}
+					return committedRead, written, errors.New("missing padding character")
+				}
+				if a[index] == '=' {
+					index++
+					for index < length && isBase64AsciiWhitespace(a[index]) {
+						index++
+					}
+				}
+			}
+			if index < length {
+				return committedRead, written, errors.New("unexpected character after padding")
+			}
+			clear(chunk[chunkLength:])
+			dec, n, decErr := decodeFinalBase64Chunk(chunk, chunkLength, lastChunkHandling == base64LastChunkHandlingStrict)
+			if decErr != nil {
+				return committedRead, written, decErr
+			}
+			written += copy(dst[written:], dec[:n])
+			return length, written, nil
+		}
+
+		b := decodeMap[char]
+		if b == 0xff {
+			return committedRead, written, errors.New("invalid base64 character")
+		}
+		remaining := len(dst) - written
+		if (remaining == 1 && chunkLength == 2) || (remaining == 2 && chunkLength == 3) {
+			return committedRead, written, nil
+		}
+		chunk[chunkLength] = b
+		chunkLength++
+		if chunkLength == 4 {
+			n := base64Assemble32Checked(chunk[0], chunk[1], chunk[2], chunk[3])
+			if remaining > 3 {
+				base64Put3Bytes(dst[written:], n)
+				written += 3
+			} else {
+				base64Put3Bytes(chunk[:], n)
+				written += copy(dst[written:], chunk[:])
+				return index, written, nil
+			}
+			committedRead = index
+			chunkLength = 0
 		}
 	}
-	return
 }
 
 // Decode a base64-encoded Unicode string.

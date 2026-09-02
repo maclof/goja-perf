@@ -61,6 +61,51 @@ func TestSandboxBuiltinAllowlist(t *testing.T) {
 	}
 }
 
+func TestSandboxUint8ArrayPolicyAndTrustedCapability(t *testing.T) {
+	t.Run("denied", func(t *testing.T) {
+		s := mustSandbox(t, SandboxPolicy{})
+		v, err := s.RunString(`typeof Uint8Array`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String(); got != "undefined" {
+			t.Fatalf("typeof Uint8Array = %q, want undefined", got)
+		}
+	})
+
+	t.Run("allowed", func(t *testing.T) {
+		s := mustSandbox(t, SandboxPolicy{
+			Builtins: SandboxBuiltins{Allow: []string{"Uint8Array"}},
+		})
+		v, err := s.RunString(`Uint8Array.fromBase64("aGVsbG8=").toBase64()`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String(); got != "aGVsbG8=" {
+			t.Fatalf("round trip = %q, want aGVsbG8=", got)
+		}
+	})
+
+	t.Run("trusted-typed-array-capability", func(t *testing.T) {
+		var trusted Value
+		s := mustSandbox(t, SandboxPolicy{
+			Capabilities: map[string]interface{}{
+				"trustedBytes": func() Value { return trusted },
+			},
+		})
+		trusted = s.runtime.newTypedArrayWithData(
+			[]byte("hello"), s.runtime.getUint8Array(), s.runtime.newUint8ArrayObject, nil,
+		).val
+		v, err := s.RunString(`[typeof Uint8Array, trustedBytes().toBase64()].join(",")`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := v.String(); got != "undefined,aGVsbG8=" {
+			t.Fatalf("capability result = %q, want undefined,aGVsbG8=", got)
+		}
+	})
+}
+
 func TestSandboxBuiltinDenylist(t *testing.T) {
 	s := mustSandbox(t, SandboxPolicy{
 		Builtins: SandboxBuiltins{AllowAll: true, Deny: []string{"Date", "eval"}},

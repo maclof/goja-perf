@@ -1673,7 +1673,19 @@ func (r *Runtime) uint8ArrayProto_toBase64(call FunctionCall) Value {
 	enc := r.parseToBase64Encoding(call.Argument(0))
 	// GetUint8ArrayBytes runs after the option getters, which may have detached the buffer.
 	toEnc := r.getUint8ArrayBytes(ta)
-	return asciiString(enc.EncodeToString(toEnc))
+	return encodeBase64ToString(enc, toEnc)
+}
+
+func encodeBase64ToString(enc *stdbase64.Encoding, src []byte) asciiString {
+	if len(src) == 0 {
+		return ""
+	}
+	encoded := make([]byte, enc.EncodedLen(len(src)))
+	enc.Encode(encoded, src)
+	// encoded is newly allocated, is not pooled or returned to any caller, and
+	// is never mutated after this ownership transfer. The immutable string keeps
+	// its backing allocation live for exactly as long as the result needs it.
+	return asciiString(unsafe.String(unsafe.SliceData(encoded), len(encoded)))
 }
 
 // parseToBase64Encoding reads the "alphabet" and "omitPadding" options of
@@ -1744,10 +1756,14 @@ func (r *Runtime) uint8ArrayProto_setFromHex(call FunctionCall) Value {
 	if err != nil {
 		panic(r.newSyntaxError(err.Error()))
 	}
-	res := r.NewObject()
-	res.self.setOwnStr("read", intToValue(int64(2*written)), false)
-	res.self.setOwnStr("written", intToValue(int64(written)), false)
-	return res
+	return r.newUint8ArraySetFromResult(2*written, written)
+}
+
+func (r *Runtime) newUint8ArraySetFromResult(read, written int) Value {
+	res := r.newBaseObjectWithCapacity(r.global.ObjectPrototype, classObject, 2)
+	res.setOwnStr("read", intToValue(int64(read)), false)
+	res.setOwnStr("written", intToValue(int64(written)), false)
+	return res.val
 }
 
 func (r *Runtime) uint8ArrayProto_setFromBase64(call FunctionCall) Value {
@@ -1776,10 +1792,7 @@ func (r *Runtime) uint8ArrayProto_setFromBase64(call FunctionCall) Value {
 		panic(r.newSyntaxError(err.Error()))
 	}
 
-	res := r.NewObject()
-	res.self.setOwnStr("read", intToValue(int64(read)), false)
-	res.self.setOwnStr("written", intToValue(int64(written)), false)
-	return res
+	return r.newUint8ArraySetFromResult(read, written)
 }
 
 func (r *Runtime) createArrayBufferProto(val *Object) objectImpl {
